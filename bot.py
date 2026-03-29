@@ -729,7 +729,7 @@ async def handle_email_setup(update: Update, context: ContextTypes.DEFAULT_TYPE)
         await set_email_settings(user_id, server, address, password)
         await update.message.reply_text(
             f"Почта подключена: {address}\n"
-            "Бот будет проверять новые чеки каждые 15 минут.\n"
+            "Бот будет проверять новые чеки каждые 2 часа.\n"
             "Отключить: /email off"
         )
         return True
@@ -831,8 +831,8 @@ async def main():
             BotCommand("email", "Подключить почту"),
         ])
 
-        app.job_queue.run_repeating(check_emails_job, interval=900, first=30, name="email_check")
-        logger.info("Email check scheduled (every 15 min)")
+        app.job_queue.run_repeating(check_emails_job, interval=7200, first=60, name="email_check")
+        logger.info("Email check scheduled (every 2 hours)")
 
         await app.start()
         await app.updater.start_polling(allowed_updates=Update.ALL_TYPES)
