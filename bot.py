@@ -20,7 +20,7 @@ from database import (
     get_default_currency, set_default_currency, get_timezone, set_timezone,
     set_budget, get_budget, get_all_budgets, delete_budget, get_category_total,
     set_email_settings, get_email_settings, disable_email, get_all_email_users,
-    is_email_processed, mark_email_processed,
+    is_email_processed, mark_email_processed, clear_processed_emails,
 )
 from ai import (
     parse_receipt_photo,
@@ -618,6 +618,16 @@ async def email_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except Exception as e:
             logger.error(f"Email debug failed: {e}")
             await update.message.reply_text(f"Ошибка: {e}")
+        return
+
+    # /email reset — clear processed emails and rescan
+    if context.args and context.args[0].lower() == "reset":
+        settings = await get_email_settings(user_id)
+        if not settings:
+            await update.message.reply_text("Сначала подключи почту: /email")
+            return
+        cleared = await clear_processed_emails(user_id)
+        await update.message.reply_text(f"Сброшено {cleared} обработанных писем. Теперь сделай /email scan 30")
         return
 
     # Start setup flow

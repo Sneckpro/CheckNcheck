@@ -268,3 +268,12 @@ async def mark_email_processed(user_id: int, email_uid: str):
             (user_id, email_uid, datetime.now(timezone.utc).isoformat()),
         )
         await db.commit()
+
+
+async def clear_processed_emails(user_id: int) -> int:
+    async with aiosqlite.connect(DB_PATH) as db:
+        cursor = await db.execute(
+            "DELETE FROM processed_emails WHERE user_id = ?", (user_id,)
+        )
+        await db.commit()
+        return cursor.rowcount
