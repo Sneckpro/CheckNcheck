@@ -1,11 +1,11 @@
 import os
 import json
-from openai import OpenAI
+from openai import AsyncOpenAI
 from dotenv import load_dotenv
 
 load_dotenv()
 
-client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+client = AsyncOpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
 MODEL = "gpt-4o-mini"
 
@@ -14,7 +14,7 @@ CATEGORIES = ["еда", "продукты", "транспорт", "покупк�
 
 
 async def parse_receipt_photo(image_url: str) -> dict | None:
-    response = client.chat.completions.create(
+    response = await client.chat.completions.create(
         model=MODEL,
         max_tokens=512,
         response_format={"type": "json_object"},
@@ -45,7 +45,7 @@ async def parse_receipt_photo(image_url: str) -> dict | None:
 
 
 async def parse_text_expense(text: str, default_currency: str = "RSD") -> dict | None:
-    response = client.chat.completions.create(
+    response = await client.chat.completions.create(
         model=MODEL,
         max_tokens=256,
         response_format={"type": "json_object"},
@@ -75,7 +75,7 @@ async def parse_text_expense(text: str, default_currency: str = "RSD") -> dict |
 
 
 async def parse_forwarded_expense(text: str, default_currency: str = "RSD") -> dict | None:
-    response = client.chat.completions.create(
+    response = await client.chat.completions.create(
         model=MODEL,
         max_tokens=256,
         response_format={"type": "json_object"},
@@ -106,7 +106,7 @@ async def parse_forwarded_expense(text: str, default_currency: str = "RSD") -> d
 async def parse_email_receipt(sender: str, subject: str, body: str,
                               default_currency: str = "RSD") -> dict | None:
     text = f"From: {sender}\nSubject: {subject}\n\n{body[:2000]}"
-    response = client.chat.completions.create(
+    response = await client.chat.completions.create(
         model=MODEL,
         max_tokens=256,
         response_format={"type": "json_object"},

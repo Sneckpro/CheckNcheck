@@ -4,7 +4,7 @@ import matplotlib.pyplot as plt
 from io import BytesIO
 
 
-def generate_pie_chart(by_category: dict[str, float], currency: str, period: str) -> BytesIO:
+def generate_pie_chart(by_category: dict[str, float], currency: str, period: str) -> BytesIO | None:
     if not by_category:
         return None
 
@@ -25,7 +25,7 @@ def generate_pie_chart(by_category: dict[str, float], currency: str, period: str
     return buf
 
 
-def generate_monthly_bars(months_data: list[dict], currency: str) -> BytesIO:
+def generate_monthly_bars(months_data: list[dict], currency: str) -> BytesIO | None:
     """months_data: [{"month": "Mar 2026", "total": 52000, "by_category": {...}}, ...]"""
     if not months_data:
         return None

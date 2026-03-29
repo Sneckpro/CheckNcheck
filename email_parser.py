@@ -84,18 +84,18 @@ def fetch_emails(server: str, address: str, password: str,
 
         if since_days:
             since_date = (datetime.now() - timedelta(days=since_days)).strftime("%d-%b-%Y")
-            _, message_nums = mail.search(None, f'(SINCE "{since_date}")')
+            _, message_nums = mail.uid('search', None, f'(SINCE "{since_date}")')
         else:
             # Default: last 2 days
             since_date = (datetime.now() - timedelta(days=2)).strftime("%d-%b-%Y")
-            _, message_nums = mail.search(None, f'(SINCE "{since_date}")')
+            _, message_nums = mail.uid('search', None, f'(SINCE "{since_date}")')
 
         if not message_nums[0]:
             mail.logout()
             return results
 
-        for msg_num in message_nums[0].split()[-50:]:  # Max 50 per scan
-            _, msg_data = mail.fetch(msg_num, "(RFC822)")
+        for msg_uid in message_nums[0].split()[-50:]:  # Max 50 per scan
+            _, msg_data = mail.uid('fetch', msg_uid, "(RFC822)")
             raw = msg_data[0][1]
             msg = email.message_from_bytes(raw)
 

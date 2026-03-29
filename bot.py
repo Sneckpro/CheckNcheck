@@ -1,5 +1,7 @@
+import asyncio
 import os
 import logging
+import signal
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
@@ -136,11 +138,11 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     amount = float(parsed["amount"])
     cur = parsed.get("currency", currency)
-    category = parsed.get("category")
+    category = (parsed.get("category") or "").lower() or None
     description = parsed.get("description")
     merchant = parsed.get("merchant")
 
-    eid = await save_expense(user_id, amount, cur, category, description, merchant)
+    await save_expense(user_id, amount, cur, category, description, merchant)
     await update.message.reply_text(f"✅ {_format_expense(parsed)}")
     await _check_budget_warning(update.message, user_id, category)
 
@@ -163,11 +165,11 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     amount = float(parsed["amount"])
     currency = parsed.get("currency", await get_default_currency(user_id))
-    category = parsed.get("category")
+    category = (parsed.get("category") or "").lower() or None
     description = parsed.get("description")
     merchant = parsed.get("merchant")
 
-    eid = await save_expense(user_id, amount, currency, category, description, merchant)
+    await save_expense(user_id, amount, currency, category, description, merchant)
     await update.message.reply_text(f"✅ {_format_expense(parsed)}")
     await _check_budget_warning(update.message, user_id, category)
 
@@ -192,11 +194,11 @@ async def handle_forwarded(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     amount = float(parsed["amount"])
     cur = parsed.get("currency", currency)
-    category = parsed.get("category")
+    category = (parsed.get("category") or "").lower() or None
     description = parsed.get("description")
     merchant = parsed.get("merchant")
 
-    eid = await save_expense(user_id, amount, cur, category, description, merchant)
+    await save_expense(user_id, amount, cur, category, description, merchant)
     await msg.reply_text(f"✅ {_format_expense(parsed)}")
     await _check_budget_warning(msg, user_id, category)
 
@@ -224,7 +226,10 @@ async def week_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_allowed(update.effective_user.id):
         return
     user_id = update.effective_user.id
-    since = datetime.now(timezone.utc) - timedelta(days=7)
+    user_tz = await _get_user_tz(user_id)
+    now_local = datetime.now(user_tz)
+    start_of_today = datetime(now_local.year, now_local.month, now_local.day, tzinfo=user_tz)
+    since = (start_of_today - timedelta(days=6)).astimezone(timezone.utc)
     expenses = await get_expenses(user_id, since=since)
     report = await generate_expense_report(expenses, "неделю")
     await update.message.reply_text(report)
@@ -368,7 +373,7 @@ async def _check_budget_warning(message, user_id: int, category: str):
         end = datetime(now_local.year + 1, 1, 1, tzinfo=user_tz).astimezone(timezone.utc)
     else:
         end = datetime(now_local.year, now_local.month + 1, 1, tzinfo=user_tz).astimezone(timezone.utc)
-    spent = await get_category_total(user_id, category, start, end)
+    spent = await get_category_total(user_id, category, start, end, currency=budget["currency"])
     pct = spent / budget["amount"] * 100 if budget["amount"] > 0 else 0
     if pct >= 100:
         await message.reply_text(f"🔴 Бюджет на {category} превышен: {spent:.0f}/{budget['amount']:.0f} {budget['currency']} ({pct:.0f}%)")
@@ -405,7 +410,7 @@ async def budget_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
             end = datetime(now_local.year + 1, 1, 1, tzinfo=user_tz).astimezone(timezone.utc)
         else:
             end = datetime(now_local.year, now_local.month + 1, 1, tzinfo=user_tz).astimezone(timezone.utc)
-        spent = await get_category_total(user_id, category, start, end)
+        spent = await get_category_total(user_id, category, start, end, currency=budget["currency"])
         pct = spent / budget["amount"] * 100 if budget["amount"] > 0 else 0
         bar = _progress_bar(pct)
         await update.message.reply_text(f"{category}: {spent:.0f}/{budget['amount']:.0f} {budget['currency']} [{bar}] {pct:.0f}%")
@@ -447,7 +452,7 @@ async def budgets_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     lines = [f"📊 Бюджеты на {now_local.strftime('%B %Y')}\n"]
     for b in budgets:
-        spent = await get_category_total(user_id, b["category"], start, end)
+        spent = await get_category_total(user_id, b["category"], start, end, currency=b["currency"])
         pct = spent / b["amount"] * 100 if b["amount"] > 0 else 0
         bar = _progress_bar(pct)
         warn = " 🔴" if pct >= 100 else " ⚠️" if pct >= 80 else ""
@@ -470,6 +475,7 @@ async def chart_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("Формат: /chart или /chart 3")
             return
         n_months = min(n_months, 12)
+        currency = await get_default_currency(user_id)
         months_data = []
         for i in range(n_months - 1, -1, -1):
             m = now_local.month - i
@@ -482,11 +488,10 @@ async def chart_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
             end_y = y if m < 12 else y + 1
             end = datetime(end_y, end_m, 1, tzinfo=user_tz).astimezone(timezone.utc)
             expenses = await get_expenses(user_id, since=start, until=end)
+            expenses = [e for e in expenses if e.get("currency", "RSD") == currency]
             total = sum(e["amount"] for e in expenses)
             month_label = datetime(y, m, 1).strftime("%b %Y")
             months_data.append({"month": month_label, "total": total})
-
-        currency = await get_default_currency(user_id)
         buf = generate_monthly_bars(months_data, currency)
         if buf:
             await update.message.reply_photo(photo=buf)
@@ -501,7 +506,9 @@ async def chart_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         end = datetime(now_local.year, now_local.month + 1, 1, tzinfo=user_tz).astimezone(timezone.utc)
 
+    currency = await get_default_currency(user_id)
     expenses = await get_expenses(user_id, since=start, until=end)
+    expenses = [e for e in expenses if e.get("currency", "RSD") == currency]
     if not expenses:
         await update.message.reply_text("Нет расходов за этот месяц.")
         return
@@ -510,8 +517,6 @@ async def chart_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     for e in expenses:
         cat = e.get("category") or "другое"
         by_category[cat] = by_category.get(cat, 0) + e["amount"]
-
-    currency = await get_default_currency(user_id)
     period = now_local.strftime("%B %Y")
     buf = generate_pie_chart(by_category, currency, period)
     if buf:
@@ -566,15 +571,20 @@ async def email_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
             except ValueError:
                 pass
         await update.message.reply_text(f"Сканирую почту за {days} дней...")
-        count = await _scan_emails(context, user_id, settings, since_days=days)
-        await update.message.reply_text(f"Найдено чеков: {count}")
+        try:
+            count = await _scan_emails(context, user_id, settings, since_days=days)
+            await update.message.reply_text(f"Найдено чеков: {count}")
+        except Exception as e:
+            logger.error(f"Email scan failed for {user_id}: {e}")
+            await update.message.reply_text(f"Ошибка сканирования: {e}")
         return
 
     # Start setup flow
-    EMAIL_SETUP_STEP[user_id] = {"step": 1}
+    EMAIL_SETUP_STEP[user_id] = {"step": 1, "started_at": datetime.now()}
     await update.message.reply_text(
         "Настройка почты. Шаг 1/3:\n\n"
-        "Введи email адрес:"
+        "Введи email адрес:\n"
+        "(Отмена: /cancel)"
     )
 
 
@@ -587,7 +597,23 @@ async def handle_email_setup(update: Update, context: ContextTypes.DEFAULT_TYPE)
     step_data = EMAIL_SETUP_STEP[user_id]
     text = update.message.text.strip()
 
+    # Cancel
+    if text.lower() in ("/cancel", "отмена", "cancel"):
+        del EMAIL_SETUP_STEP[user_id]
+        await update.message.reply_text("Настройка почты отменена.")
+        return True
+
+    # Timeout (5 min)
+    if (datetime.now() - step_data.get("started_at", datetime.now())).total_seconds() > 300:
+        del EMAIL_SETUP_STEP[user_id]
+        await update.message.reply_text("Таймаут настройки. Начни заново: /email")
+        return True
+
     if step_data["step"] == 1:
+        # Validate email
+        if "@" not in text or "." not in text.split("@")[-1]:
+            await update.message.reply_text("Некорректный email. Попробуй ещё раз:")
+            return True
         # Got email address, guess IMAP server
         step_data["address"] = text
         domain = text.split("@")[-1].lower() if "@" in text else ""
@@ -643,8 +669,10 @@ async def handle_email_setup(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
 async def _scan_emails(context, user_id: int, settings: dict, since_days: int | None = None) -> int:
     """Scan emails, skip already processed, save new receipts. Returns count found."""
-    emails = fetch_emails(settings["email_server"], settings["email_address"],
-                          settings["email_password"], since_days=since_days)
+    emails = await asyncio.to_thread(
+        fetch_emails, settings["email_server"], settings["email_address"],
+        settings["email_password"], since_days=since_days
+    )
     currency = await get_default_currency(user_id)
     count = 0
     for em in emails:
@@ -656,8 +684,9 @@ async def _scan_emails(context, user_id: int, settings: dict, since_days: int | 
             continue
         amount = float(parsed["amount"])
         cur = parsed.get("currency", currency)
+        category = (parsed.get("category") or "").lower() or None
         await save_expense(user_id, amount, cur,
-                           parsed.get("category"), parsed.get("description"), parsed.get("merchant"))
+                           category, parsed.get("description"), parsed.get("merchant"))
         text = _format_expense(parsed)
         await context.bot.send_message(chat_id=user_id, text=f"📧 Чек из почты:\n✅ {text}")
         count += 1
@@ -727,17 +756,16 @@ async def main():
         await app.start()
         await app.updater.start_polling(allowed_updates=Update.ALL_TYPES)
 
-        import asyncio
         stop_event = asyncio.Event()
-        try:
-            await stop_event.wait()
-        except (KeyboardInterrupt, SystemExit):
-            pass
-        finally:
-            await app.updater.stop()
-            await app.stop()
+        loop = asyncio.get_running_loop()
+        for sig in (signal.SIGINT, signal.SIGTERM):
+            loop.add_signal_handler(sig, stop_event.set)
+
+        await stop_event.wait()
+
+        await app.updater.stop()
+        await app.stop()
 
 
 if __name__ == "__main__":
-    import asyncio
     asyncio.run(main())

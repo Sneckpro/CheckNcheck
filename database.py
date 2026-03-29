@@ -50,6 +50,9 @@ async def init_db():
                 await db.execute(f"ALTER TABLE user_settings ADD COLUMN {col}")
             except Exception:
                 pass
+        await db.execute("CREATE INDEX IF NOT EXISTS idx_expenses_user_date ON expenses(user_id, created_at)")
+        await db.execute("CREATE INDEX IF NOT EXISTS idx_expenses_user_cat_date ON expenses(user_id, category, created_at)")
+        await db.execute("CREATE INDEX IF NOT EXISTS idx_processed_emails_user_uid ON processed_emails(user_id, email_uid)")
         await db.commit()
 
 
@@ -191,13 +194,16 @@ async def delete_budget(user_id: int, category: str) -> bool:
         return cursor.rowcount > 0
 
 
-async def get_category_total(user_id: int, category: str, since: datetime, until: datetime) -> float:
+async def get_category_total(user_id: int, category: str, since: datetime, until: datetime,
+                             currency: str | None = None) -> float:
     async with aiosqlite.connect(DB_PATH) as db:
-        cursor = await db.execute(
-            "SELECT COALESCE(SUM(amount), 0) FROM expenses "
-            "WHERE user_id = ? AND category = ? AND created_at >= ? AND created_at < ?",
-            (user_id, category, since.isoformat(), until.isoformat()),
-        )
+        query = ("SELECT COALESCE(SUM(amount), 0) FROM expenses "
+                 "WHERE user_id = ? AND category = ? AND created_at >= ? AND created_at < ?")
+        params: list = [user_id, category, since.isoformat(), until.isoformat()]
+        if currency:
+            query += " AND currency = ?"
+            params.append(currency)
+        cursor = await db.execute(query, params)
         row = await cursor.fetchone()
         return row[0]
 
