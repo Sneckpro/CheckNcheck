@@ -572,11 +572,52 @@ async def email_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 pass
         await update.message.reply_text(f"Сканирую почту за {days} дней...")
         try:
-            count = await _scan_emails(context, user_id, settings, since_days=days)
-            await update.message.reply_text(f"Найдено чеков: {count}")
+            stats = await _scan_emails(context, user_id, settings, since_days=days)
+            await update.message.reply_text(
+                f"📧 Результат сканирования:\n"
+                f"Писем всего: {stats['total']}\n"
+                f"Похожи на чеки: {stats['filtered']}\n"
+                f"Уже обработаны: {stats['already']}\n"
+                f"Новых чеков: {stats['found']}"
+            )
         except Exception as e:
             logger.error(f"Email scan failed for {user_id}: {e}")
             await update.message.reply_text(f"Ошибка сканирования: {e}")
+        return
+
+    # /email debug 7 — show what filter sees
+    if context.args and context.args[0].lower() == "debug":
+        settings = await get_email_settings(user_id)
+        if not settings:
+            await update.message.reply_text("Сначала подключи почту: /email")
+            return
+        days = 7
+        if len(context.args) > 1:
+            try:
+                days = int(context.args[1])
+            except ValueError:
+                pass
+        await update.message.reply_text(f"Дебаг: сканирую {days} дней...")
+        try:
+            stats = await _scan_emails(context, user_id, settings, since_days=days, debug=True)
+            lines = [
+                f"📧 Дебаг за {days} дней:\n",
+                f"Писем всего: {stats['total']}",
+                f"Прошли фильтр: {stats['filtered']}",
+                f"Отброшены фильтром: {stats['total'] - stats['filtered']}",
+            ]
+            if stats["skipped"]:
+                lines.append(f"\nОтброшенные (последние 10):")
+                for s in stats["skipped"][-10:]:
+                    lines.append(f"  ✗ {s['from'][:40]}")
+                    lines.append(f"    {s['subject'][:50]}")
+            if stats["filtered"] > 0:
+                lines.append(f"\nПрошли фильтр → GPT: {stats['filtered']}")
+                lines.append(f"Из них чеки: {stats['found']}")
+            await update.message.reply_text("\n".join(lines))
+        except Exception as e:
+            logger.error(f"Email debug failed: {e}")
+            await update.message.reply_text(f"Ошибка: {e}")
         return
 
     # Start setup flow
@@ -675,16 +716,20 @@ async def handle_email_setup(update: Update, context: ContextTypes.DEFAULT_TYPE)
     return False
 
 
-async def _scan_emails(context, user_id: int, settings: dict, since_days: int | None = None) -> int:
-    """Scan emails, skip already processed, save new receipts. Returns count found."""
-    emails = await asyncio.to_thread(
+async def _scan_emails(context, user_id: int, settings: dict,
+                       since_days: int | None = None, debug: bool = False) -> dict:
+    """Scan emails, skip already processed, save new receipts. Returns stats."""
+    data = await asyncio.to_thread(
         fetch_emails, settings["email_server"], settings["email_address"],
-        settings["email_password"], since_days=since_days
+        settings["email_password"], since_days=since_days, debug=debug
     )
+    emails = data["results"]
     currency = await get_default_currency(user_id)
-    count = 0
+    found = 0
+    already = 0
     for em in emails:
         if await is_email_processed(user_id, em["uid"]):
+            already += 1
             continue
         parsed = await parse_email_receipt(em["from"], em["subject"], em["body"], currency)
         await mark_email_processed(user_id, em["uid"])
@@ -697,8 +742,14 @@ async def _scan_emails(context, user_id: int, settings: dict, since_days: int | 
                            category, parsed.get("description"), parsed.get("merchant"))
         text = _format_expense(parsed)
         await context.bot.send_message(chat_id=user_id, text=f"📧 Чек из почты:\n✅ {text}")
-        count += 1
-    return count
+        found += 1
+    return {
+        "total": data["total"],
+        "filtered": len(emails),
+        "already": already,
+        "found": found,
+        "skipped": data.get("skipped", []),
+    }
 
 
 async def check_emails_job(context: ContextTypes.DEFAULT_TYPE):

@@ -22,6 +22,9 @@ RECEIPT_KEYWORDS = [
     "чек", "заказ", "оплата", "подтверждение", "квитанция",
     "purchase", "transaction", "billing", "subscription",
     "доставка", "delivery", "shipped",
+    # Serbian
+    "porudžbina", "porudzbina", "račun", "racun", "isporučena", "isporucena",
+    "narudžba", "narudzbina", "uplata", "potvrda",
 ]
 
 
@@ -74,9 +77,11 @@ def _extract_text(msg: email.message.Message) -> str:
 
 
 def fetch_emails(server: str, address: str, password: str,
-                 since_days: int | None = None) -> list[dict]:
-    """Fetch emails from IMAP. Returns list with stable UID for dedup."""
+                 since_days: int | None = None, debug: bool = False) -> dict:
+    """Fetch emails from IMAP. Returns dict with results, stats, and debug info."""
     results = []
+    skipped = []
+    total_count = 0
     try:
         mail = imaplib.IMAP4_SSL(server)
         mail.login(address, password)
@@ -86,20 +91,21 @@ def fetch_emails(server: str, address: str, password: str,
             since_date = (datetime.now() - timedelta(days=since_days)).strftime("%d-%b-%Y")
             _, message_nums = mail.uid('search', None, f'(SINCE "{since_date}")')
         else:
-            # Default: last 2 days
             since_date = (datetime.now() - timedelta(days=2)).strftime("%d-%b-%Y")
             _, message_nums = mail.uid('search', None, f'(SINCE "{since_date}")')
 
         if not message_nums[0]:
             mail.logout()
-            return results
+            return {"results": [], "skipped": [], "total": 0}
 
-        for msg_uid in message_nums[0].split()[-50:]:  # Max 50 per scan
+        msg_uids = message_nums[0].split()[-50:]
+        total_count = len(msg_uids)
+
+        for msg_uid in msg_uids:
             _, msg_data = mail.uid('fetch', msg_uid, "(RFC822)")
             raw = msg_data[0][1]
             msg = email.message_from_bytes(raw)
 
-            # Use Message-ID as stable unique identifier
             message_id = msg.get("Message-ID", "")
             if not message_id:
                 message_id = f"{msg.get('Date', '')}_{msg.get('From', '')}_{msg.get('Subject', '')}"
@@ -108,6 +114,8 @@ def fetch_emails(server: str, address: str, password: str,
             subject = _decode_header(msg.get("Subject", ""))
 
             if not _looks_like_receipt(sender, subject):
+                if debug:
+                    skipped.append({"from": sender[:50], "subject": subject[:60]})
                 continue
 
             body = _extract_text(msg)
@@ -123,4 +131,4 @@ def fetch_emails(server: str, address: str, password: str,
     except Exception as e:
         logger.error(f"IMAP error for {address}: {e}")
 
-    return results
+    return {"results": results, "skipped": skipped, "total": total_count}
