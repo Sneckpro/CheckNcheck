@@ -104,6 +104,20 @@ async def get_recent_expenses(user_id: int, limit: int = 10) -> list[dict]:
         return [dict(row) for row in rows]
 
 
+async def get_top_expenses(user_id: int, since: datetime, until: datetime,
+                           limit: int = 5) -> list[dict]:
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        cursor = await db.execute(
+            "SELECT id, amount, currency, category, description, merchant, created_at "
+            "FROM expenses WHERE user_id = ? AND created_at >= ? AND created_at < ? "
+            "ORDER BY amount DESC LIMIT ?",
+            (user_id, since.isoformat(), until.isoformat(), limit),
+        )
+        rows = await cursor.fetchall()
+        return [dict(row) for row in rows]
+
+
 async def clear_all_expenses(user_id: int) -> int:
     async with aiosqlite.connect(DB_PATH) as db:
         cursor = await db.execute("DELETE FROM expenses WHERE user_id = ?", (user_id,))

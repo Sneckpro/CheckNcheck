@@ -135,7 +135,11 @@ async def parse_email_receipt(sender: str, subject: str, body: str,
 
 
 async def generate_expense_report(expenses: list[dict], period_name: str,
-                                   target_currency: str | None = None) -> str:
+                                   target_currency: str | None = None,
+                                   days_passed: int | None = None,
+                                   days_left: int | None = None,
+                                   budget_amount: float | None = None,
+                                   prev_period_total: float | None = None) -> str:
     if not expenses:
         return f"Нет расходов за {period_name}."
 
@@ -178,5 +182,24 @@ async def generate_expense_report(expenses: list[dict], period_name: str,
     lines.append(f"💰 Итого: {total:.2f} {display_cur}")
     if has_mixed and target_currency:
         lines.append(f"(конвертировано в {target_currency} по текущему курсу)")
+
+    # Analytics
+    if days_passed and days_passed > 0:
+        avg_per_day = total / days_passed
+        lines.append(f"\n📈 В среднем: {avg_per_day:.0f} {display_cur}/день")
+
+        if days_left is not None and days_left > 0:
+            if budget_amount and budget_amount > total:
+                remaining = budget_amount - total
+                can_spend = remaining / days_left
+                lines.append(f"📅 Осталось {days_left} дн. → можно ~{can_spend:.0f} {display_cur}/день")
+            elif budget_amount:
+                over = total - budget_amount
+                lines.append(f"📅 Осталось {days_left} дн. Бюджет превышен на {over:.0f} {display_cur}")
+
+    if prev_period_total is not None and prev_period_total > 0:
+        change = ((total - prev_period_total) / prev_period_total) * 100
+        sign = "+" if change >= 0 else ""
+        lines.append(f"📊 vs прошлый: {sign}{change:.0f}% (было {prev_period_total:.0f} {display_cur})")
 
     return "\n".join(lines)

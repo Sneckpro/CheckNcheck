@@ -16,7 +16,7 @@ from telegram.ext import (
 )
 
 from database import (
-    init_db, save_expense, get_expenses, get_recent_expenses, delete_expense, clear_all_expenses,
+    init_db, save_expense, get_expenses, get_recent_expenses, delete_expense, clear_all_expenses, get_top_expenses,
     get_default_currency, set_default_currency, get_timezone, set_timezone,
     set_budget, get_budget, get_all_budgets, delete_budget, get_category_total,
     set_email_settings, get_email_settings, disable_email, get_all_email_users,
@@ -285,8 +285,64 @@ async def month_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     month_name = start_of_month.strftime("%B %Y")
     expenses = await get_expenses(user_id, since=since_utc, until=until_utc)
     currency = await get_default_currency(user_id)
-    report = await generate_expense_report(expenses, month_name, target_currency=currency)
+
+    # Analytics: days passed, days left, budget, prev month
+    import calendar
+    total_days = calendar.monthrange(year, month)[1]
+    is_current = (month == now_local.month and year == now_local.year)
+    days_passed = now_local.day if is_current else total_days
+    days_left = total_days - days_passed if is_current else 0
+
+    # Previous month total
+    if month == 1:
+        prev_start = datetime(year - 1, 12, 1, tzinfo=user_tz).astimezone(timezone.utc)
+        prev_end = start_of_month.astimezone(timezone.utc)
+    else:
+        prev_start = datetime(year, month - 1, 1, tzinfo=user_tz).astimezone(timezone.utc)
+        prev_end = since_utc
+    prev_expenses = await get_expenses(user_id, since=prev_start, until=prev_end)
+    prev_total = sum(e["amount"] for e in prev_expenses) if prev_expenses else None
+
+    # Total budget
+    total_budget = await get_budget(user_id, "_общий")
+    budget_amount = total_budget["amount"] if total_budget else None
+
+    report = await generate_expense_report(
+        expenses, month_name, target_currency=currency,
+        days_passed=days_passed, days_left=days_left,
+        budget_amount=budget_amount, prev_period_total=prev_total,
+    )
     await update.message.reply_text(report)
+
+
+async def top_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_allowed(update.effective_user.id):
+        return
+    user_id = update.effective_user.id
+    user_tz = await _get_user_tz(user_id)
+    now_local = datetime.now(user_tz)
+    start = datetime(now_local.year, now_local.month, 1, tzinfo=user_tz).astimezone(timezone.utc)
+    if now_local.month == 12:
+        end = datetime(now_local.year + 1, 1, 1, tzinfo=user_tz).astimezone(timezone.utc)
+    else:
+        end = datetime(now_local.year, now_local.month + 1, 1, tzinfo=user_tz).astimezone(timezone.utc)
+
+    limit = 5
+    if context.args:
+        try:
+            limit = int(context.args[0])
+        except ValueError:
+            pass
+
+    top = await get_top_expenses(user_id, start, end, limit=limit)
+    if not top:
+        await update.message.reply_text("Нет расходов за этот месяц.")
+        return
+
+    lines = [f"🏆 Топ расходов за {now_local.strftime('%B %Y')}\n"]
+    for i, e in enumerate(top, 1):
+        lines.append(f"{i}. {_format_expense(e)}")
+    await update.message.reply_text("\n".join(lines))
 
 
 async def history_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -849,6 +905,7 @@ async def main():
     app.add_handler(CommandHandler("today", today_cmd))
     app.add_handler(CommandHandler("week", week_cmd))
     app.add_handler(CommandHandler("month", month_cmd))
+    app.add_handler(CommandHandler("top", top_cmd))
     app.add_handler(CommandHandler("history", history_cmd))
     app.add_handler(CommandHandler("delete", delete_cmd))
     app.add_handler(CommandHandler("clearall", clearall_cmd))
@@ -869,6 +926,7 @@ async def main():
             BotCommand("today", "Расходы за сегодня"),
             BotCommand("week", "Расходы за неделю"),
             BotCommand("month", "Отчёт за месяц"),
+            BotCommand("top", "Топ расходов за месяц"),
             BotCommand("history", "Последние расходы"),
             BotCommand("delete", "Удалить расход"),
             BotCommand("currency", "Валюта по умолчанию"),
