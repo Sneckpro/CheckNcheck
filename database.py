@@ -36,6 +36,15 @@ async def init_db():
                 UNIQUE(user_id, category)
             )
         """)
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS processed_emails (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER NOT NULL,
+                email_uid TEXT NOT NULL,
+                processed_at TEXT NOT NULL,
+                UNIQUE(user_id, email_uid)
+            )
+        """)
         for col in ("email_server TEXT", "email_address TEXT", "email_password TEXT", "email_enabled INTEGER DEFAULT 0"):
             try:
                 await db.execute(f"ALTER TABLE user_settings ADD COLUMN {col}")
@@ -235,3 +244,21 @@ async def get_all_email_users() -> list[dict]:
         )
         rows = await cursor.fetchall()
         return [dict(row) for row in rows]
+
+
+async def is_email_processed(user_id: int, email_uid: str) -> bool:
+    async with aiosqlite.connect(DB_PATH) as db:
+        cursor = await db.execute(
+            "SELECT 1 FROM processed_emails WHERE user_id = ? AND email_uid = ?",
+            (user_id, email_uid),
+        )
+        return await cursor.fetchone() is not None
+
+
+async def mark_email_processed(user_id: int, email_uid: str):
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            "INSERT OR IGNORE INTO processed_emails (user_id, email_uid, processed_at) VALUES (?, ?, ?)",
+            (user_id, email_uid, datetime.now(timezone.utc).isoformat()),
+        )
+        await db.commit()

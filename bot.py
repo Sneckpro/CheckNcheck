@@ -18,6 +18,7 @@ from database import (
     get_default_currency, set_default_currency, get_timezone, set_timezone,
     set_budget, get_budget, get_all_budgets, delete_budget, get_category_total,
     set_email_settings, get_email_settings, disable_email, get_all_email_users,
+    is_email_processed, mark_email_processed,
 )
 from ai import (
     parse_receipt_photo,
@@ -27,7 +28,7 @@ from ai import (
     generate_expense_report,
 )
 from charts import generate_pie_chart, generate_monthly_bars
-from email_parser import fetch_unseen_emails
+from email_parser import fetch_emails
 
 load_dotenv()
 
@@ -549,6 +550,23 @@ async def email_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("Почта не подключена.")
         return
 
+    # /email scan 30 — scan last N days
+    if context.args and context.args[0].lower() == "scan":
+        settings = await get_email_settings(user_id)
+        if not settings:
+            await update.message.reply_text("Сначала подключи почту: /email")
+            return
+        days = 30
+        if len(context.args) > 1:
+            try:
+                days = int(context.args[1])
+            except ValueError:
+                pass
+        await update.message.reply_text(f"Сканирую почту за {days} дней...")
+        count = await _scan_emails(context, user_id, settings, since_days=days)
+        await update.message.reply_text(f"Найдено чеков: {count}")
+        return
+
     # Start setup flow
     EMAIL_SETUP_STEP[user_id] = {"step": 1}
     await update.message.reply_text(
@@ -620,26 +638,39 @@ async def handle_email_setup(update: Update, context: ContextTypes.DEFAULT_TYPE)
     return False
 
 
+async def _scan_emails(context, user_id: int, settings: dict, since_days: int | None = None) -> int:
+    """Scan emails, skip already processed, save new receipts. Returns count found."""
+    emails = fetch_emails(settings["email_server"], settings["email_address"],
+                          settings["email_password"], since_days=since_days)
+    currency = await get_default_currency(user_id)
+    count = 0
+    for em in emails:
+        if await is_email_processed(user_id, em["uid"]):
+            continue
+        parsed = await parse_email_receipt(em["from"], em["subject"], em["body"], currency)
+        await mark_email_processed(user_id, em["uid"])
+        if not parsed or "amount" not in parsed:
+            continue
+        amount = float(parsed["amount"])
+        cur = parsed.get("currency", currency)
+        await save_expense(user_id, amount, cur,
+                           parsed.get("category"), parsed.get("description"), parsed.get("merchant"))
+        text = _format_expense(parsed)
+        await context.bot.send_message(chat_id=user_id, text=f"📧 Чек из почты:\n✅ {text}")
+        count += 1
+    return count
+
+
 async def check_emails_job(context: ContextTypes.DEFAULT_TYPE):
     """Periodic job: check all users' emails for receipts."""
     users = await get_all_email_users()
     for u in users:
-        user_id = u["user_id"]
         try:
-            emails = fetch_unseen_emails(u["email_server"], u["email_address"], u["email_password"])
-            currency = await get_default_currency(user_id)
-            for em in emails:
-                parsed = await parse_email_receipt(em["from"], em["subject"], em["body"], currency)
-                if not parsed or "amount" not in parsed:
-                    continue
-                amount = float(parsed["amount"])
-                cur = parsed.get("currency", currency)
-                await save_expense(user_id, amount, cur,
-                                   parsed.get("category"), parsed.get("description"), parsed.get("merchant"))
-                text = _format_expense(parsed)
-                await context.bot.send_message(chat_id=user_id, text=f"📧 Чек из почты:\n✅ {text}")
+            settings = {"email_server": u["email_server"], "email_address": u["email_address"],
+                        "email_password": u["email_password"]}
+            await _scan_emails(context, u["user_id"], settings)
         except Exception as e:
-            logger.error(f"Email check failed for {user_id}: {e}")
+            logger.error(f"Email check failed for {u['user_id']}: {e}")
 
 
 # --- Main ---
