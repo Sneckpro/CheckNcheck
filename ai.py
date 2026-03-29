@@ -138,15 +138,6 @@ async def generate_expense_report(expenses: list[dict], period_name: str) -> str
     if not expenses:
         return f"Нет расходов за {period_name}."
 
-    # Group by category
-    by_category: dict[str, float] = {}
-    total = 0.0
-    currency = expenses[0].get("currency", "RSD")
-    for e in expenses:
-        cat = e.get("category") or "другое"
-        by_category[cat] = by_category.get(cat, 0) + e["amount"]
-        total += e["amount"]
-
     EMOJI = {
         "еда": "\U0001f354", "продукты": "\U0001f6d2", "транспорт": "\U0001f697",
         "покупки": "\U0001f6cd\ufe0f", "развлечения": "\U0001f3ac",
@@ -154,11 +145,28 @@ async def generate_expense_report(expenses: list[dict], period_name: str) -> str
         "подписки": "\U0001f4f1", "другое": "\U0001f4cc",
     }
 
+    # Group by currency, then by category
+    by_currency: dict[str, dict[str, float]] = {}
+    totals: dict[str, float] = {}
+    for e in expenses:
+        cur = e.get("currency", "RSD")
+        cat = e.get("category") or "другое"
+        if cur not in by_currency:
+            by_currency[cur] = {}
+            totals[cur] = 0.0
+        by_currency[cur][cat] = by_currency[cur].get(cat, 0) + e["amount"]
+        totals[cur] += e["amount"]
+
     lines = [f"📊 Расходы за {period_name}\n"]
-    for cat, amount in sorted(by_category.items(), key=lambda x: -x[1]):
-        emoji = EMOJI.get(cat, "📌")
-        lines.append(f"{emoji} {cat.capitalize()}: {amount:.2f} {currency}")
-    lines.append("─────────────")
-    lines.append(f"💰 Итого: {total:.2f} {currency}")
+    for cur, cats in by_currency.items():
+        if len(by_currency) > 1:
+            lines.append(f"— {cur} —")
+        for cat, amount in sorted(cats.items(), key=lambda x: -x[1]):
+            emoji = EMOJI.get(cat, "📌")
+            lines.append(f"{emoji} {cat.capitalize()}: {amount:.2f} {cur}")
+        lines.append("─────────────")
+        lines.append(f"💰 Итого: {totals[cur]:.2f} {cur}")
+        if len(by_currency) > 1:
+            lines.append("")
 
     return "\n".join(lines)

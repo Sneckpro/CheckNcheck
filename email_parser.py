@@ -13,8 +13,7 @@ RECEIPT_SENDERS = [
     "apple", "google play", "netflix", "spotify", "youtube",
     "booking", "airbnb", "ryanair", "wizz",
     "lidl", "aldi", "ikea", "zara", "h&m",
-    "noreply", "no-reply", "receipt", "invoice", "payment",
-    "order", "confirmation",
+    "receipt", "invoice",
 ]
 
 # Keywords in subject (lowercase)

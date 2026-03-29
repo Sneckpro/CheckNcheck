@@ -69,7 +69,9 @@ def _format_expense(e: dict) -> str:
     desc = e.get("description") or e.get("merchant") or "—"
     cat = f" [{e['category']}]" if e.get("category") else ""
     merchant = f" ({e['merchant']})" if e.get("merchant") and e.get("description") else ""
-    return f"{e['amount']:.2f} {e['currency']} — {desc}{merchant}{cat}"
+    amount = float(e.get("amount", 0))
+    currency = e.get("currency", "RSD")
+    return f"{amount:.2f} {currency} — {desc}{merchant}{cat}"
 
 
 # --- Handlers ---
@@ -140,7 +142,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     eid = await save_expense(user_id, amount, cur, category, description, merchant)
     await update.message.reply_text(f"✅ {_format_expense(parsed)}")
-    await _check_budget_warning(update, user_id, category)
+    await _check_budget_warning(update.message, user_id, category)
 
 
 async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -167,7 +169,7 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     eid = await save_expense(user_id, amount, currency, category, description, merchant)
     await update.message.reply_text(f"✅ {_format_expense(parsed)}")
-    await _check_budget_warning(update, user_id, category)
+    await _check_budget_warning(update.message, user_id, category)
 
 
 async def handle_forwarded(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -196,6 +198,7 @@ async def handle_forwarded(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     eid = await save_expense(user_id, amount, cur, category, description, merchant)
     await msg.reply_text(f"✅ {_format_expense(parsed)}")
+    await _check_budget_warning(msg, user_id, category)
 
 
 async def _get_user_tz(user_id: int) -> ZoneInfo | timezone:
@@ -351,7 +354,7 @@ async def timezone_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(f"Часовой пояс: {tz_name} (сейчас {now_local})")
 
 
-async def _check_budget_warning(update: Update, user_id: int, category: str):
+async def _check_budget_warning(message, user_id: int, category: str):
     """Send warning if expense category is near/over budget."""
     if not category:
         return
@@ -368,9 +371,9 @@ async def _check_budget_warning(update: Update, user_id: int, category: str):
     spent = await get_category_total(user_id, category, start, end)
     pct = spent / budget["amount"] * 100 if budget["amount"] > 0 else 0
     if pct >= 100:
-        await update.message.reply_text(f"🔴 Бюджет на {category} превышен: {spent:.0f}/{budget['amount']:.0f} {budget['currency']} ({pct:.0f}%)")
+        await message.reply_text(f"🔴 Бюджет на {category} превышен: {spent:.0f}/{budget['amount']:.0f} {budget['currency']} ({pct:.0f}%)")
     elif pct >= 80:
-        await update.message.reply_text(f"⚠️ Бюджет на {category}: {spent:.0f}/{budget['amount']:.0f} {budget['currency']} ({pct:.0f}%)")
+        await message.reply_text(f"⚠️ Бюджет на {category}: {spent:.0f}/{budget['amount']:.0f} {budget['currency']} ({pct:.0f}%)")
 
 
 def _progress_bar(pct: float) -> str:
