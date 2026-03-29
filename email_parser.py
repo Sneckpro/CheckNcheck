@@ -1,5 +1,6 @@
 import imaplib
 import email
+import re
 from email.header import decode_header
 from datetime import datetime, timedelta
 import logging
@@ -13,18 +14,19 @@ RECEIPT_SENDERS = [
     "apple", "google play", "netflix", "spotify", "youtube",
     "booking", "airbnb", "ryanair", "wizz",
     "lidl", "aldi", "ikea", "zara", "h&m",
+    "ozon", "wildberries", "webmoney", "tinkoff", "sber",
     "receipt", "invoice",
 ]
 
 # Keywords in subject (lowercase)
 RECEIPT_KEYWORDS = [
     "receipt", "invoice", "order", "payment", "confirmation",
-    "чек", "заказ", "оплата", "подтверждение", "квитанция",
+    "чек", "заказ", "оплат", "подтвержден", "квитанц",
     "purchase", "transaction", "billing", "subscription",
-    "доставка", "delivery", "shipped",
+    "доставк", "delivery", "shipped",
     # Serbian
-    "porudžbina", "porudzbina", "račun", "racun", "isporučena", "isporucena",
-    "narudžba", "narudzbina", "uplata", "potvrda",
+    "porudž", "porudz", "račun", "racun", "isporuč", "isporuc",
+    "narudž", "narudz", "uplat", "potvrda",
 ]
 
 
@@ -52,28 +54,53 @@ def _decode_header(header: str) -> str:
     return " ".join(decoded)
 
 
+def _strip_html(html: str) -> str:
+    """Convert HTML to plain text."""
+    text = re.sub(r'<style[^>]*>.*?</style>', '', html, flags=re.DOTALL)
+    text = re.sub(r'<script[^>]*>.*?</script>', '', text, flags=re.DOTALL)
+    text = re.sub(r'<br\s*/?>', '\n', text, flags=re.IGNORECASE)
+    text = re.sub(r'</(?:p|div|tr|li|h\d)>', '\n', text, flags=re.IGNORECASE)
+    text = re.sub(r'<[^>]+>', ' ', text)
+    text = re.sub(r'&nbsp;', ' ', text)
+    text = re.sub(r'&amp;', '&', text)
+    text = re.sub(r'&#\d+;', ' ', text)
+    text = re.sub(r' +', ' ', text)
+    text = re.sub(r'\n\s*\n', '\n', text)
+    return text.strip()
+
+
 def _extract_text(msg: email.message.Message) -> str:
     """Extract text content from email message."""
-    texts = []
+    plain_texts = []
+    html_texts = []
     if msg.is_multipart():
         for part in msg.walk():
             content_type = part.get_content_type()
+            payload = part.get_payload(decode=True)
+            if not payload:
+                continue
+            charset = part.get_content_charset() or "utf-8"
+            decoded = payload.decode(charset, errors="replace")
             if content_type == "text/plain":
-                payload = part.get_payload(decode=True)
-                if payload:
-                    charset = part.get_content_charset() or "utf-8"
-                    texts.append(payload.decode(charset, errors="replace"))
-            elif content_type == "text/html" and not texts:
-                payload = part.get_payload(decode=True)
-                if payload:
-                    charset = part.get_content_charset() or "utf-8"
-                    texts.append(payload.decode(charset, errors="replace"))
+                plain_texts.append(decoded)
+            elif content_type == "text/html":
+                html_texts.append(decoded)
     else:
         payload = msg.get_payload(decode=True)
         if payload:
             charset = msg.get_content_charset() or "utf-8"
-            texts.append(payload.decode(charset, errors="replace"))
-    return "\n".join(texts)[:3000]
+            decoded = payload.decode(charset, errors="replace")
+            if msg.get_content_type() == "text/html":
+                html_texts.append(decoded)
+            else:
+                plain_texts.append(decoded)
+
+    # Prefer plain text, fall back to stripped HTML
+    if plain_texts:
+        return "\n".join(plain_texts)[:3000]
+    if html_texts:
+        return _strip_html("\n".join(html_texts))[:3000]
+    return ""
 
 
 def fetch_emails(server: str, address: str, password: str,
