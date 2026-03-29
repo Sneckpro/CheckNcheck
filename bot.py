@@ -2,6 +2,7 @@ import asyncio
 import os
 import logging
 import signal
+import calendar
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
@@ -287,13 +288,12 @@ async def month_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     currency = await get_default_currency(user_id)
 
     # Analytics: days passed, days left, budget, prev month
-    import calendar
     total_days = calendar.monthrange(year, month)[1]
     is_current = (month == now_local.month and year == now_local.year)
     days_passed = now_local.day if is_current else total_days
     days_left = total_days - days_passed if is_current else 0
 
-    # Previous month total
+    # Previous month total (with currency conversion)
     if month == 1:
         prev_start = datetime(year - 1, 12, 1, tzinfo=user_tz).astimezone(timezone.utc)
         prev_end = start_of_month.astimezone(timezone.utc)
@@ -301,7 +301,18 @@ async def month_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         prev_start = datetime(year, month - 1, 1, tzinfo=user_tz).astimezone(timezone.utc)
         prev_end = since_utc
     prev_expenses = await get_expenses(user_id, since=prev_start, until=prev_end)
-    prev_total = sum(e["amount"] for e in prev_expenses) if prev_expenses else None
+    prev_total = None
+    if prev_expenses:
+        from currency import convert
+        prev_total = 0.0
+        for e in prev_expenses:
+            amt = e["amount"]
+            cur = e.get("currency", currency)
+            if cur != currency:
+                converted = convert(amt, cur, currency)
+                if converted is not None:
+                    amt = converted
+            prev_total += amt
 
     # Total budget
     total_budget = await get_budget(user_id, "_общий")
