@@ -21,6 +21,7 @@ from database import (
     set_budget, get_budget, get_all_budgets, delete_budget, get_category_total,
     set_email_settings, get_email_settings, disable_email, get_all_email_users,
     is_email_processed, mark_email_processed, clear_processed_emails,
+    get_total_spent,
 )
 from ai import (
     parse_receipt_photo,
@@ -384,12 +385,7 @@ async def timezone_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def _check_budget_warning(message, user_id: int, category: str):
-    """Send warning if expense category is near/over budget."""
-    if not category:
-        return
-    budget = await get_budget(user_id, category)
-    if not budget:
-        return
+    """Send warning if expense category or total budget is near/over."""
     user_tz = await _get_user_tz(user_id)
     now_local = datetime.now(user_tz)
     start = datetime(now_local.year, now_local.month, 1, tzinfo=user_tz).astimezone(timezone.utc)
@@ -397,12 +393,27 @@ async def _check_budget_warning(message, user_id: int, category: str):
         end = datetime(now_local.year + 1, 1, 1, tzinfo=user_tz).astimezone(timezone.utc)
     else:
         end = datetime(now_local.year, now_local.month + 1, 1, tzinfo=user_tz).astimezone(timezone.utc)
-    spent = await get_category_total(user_id, category, start, end, currency=budget["currency"])
-    pct = spent / budget["amount"] * 100 if budget["amount"] > 0 else 0
-    if pct >= 100:
-        await message.reply_text(f"🔴 Бюджет на {category} превышен: {spent:.0f}/{budget['amount']:.0f} {budget['currency']} ({pct:.0f}%)")
-    elif pct >= 80:
-        await message.reply_text(f"⚠️ Бюджет на {category}: {spent:.0f}/{budget['amount']:.0f} {budget['currency']} ({pct:.0f}%)")
+
+    # Check category budget
+    if category:
+        budget = await get_budget(user_id, category)
+        if budget:
+            spent = await get_category_total(user_id, category, start, end, currency=budget["currency"])
+            pct = spent / budget["amount"] * 100 if budget["amount"] > 0 else 0
+            if pct >= 100:
+                await message.reply_text(f"🔴 Бюджет на {category} превышен: {spent:.0f}/{budget['amount']:.0f} {budget['currency']} ({pct:.0f}%)")
+            elif pct >= 80:
+                await message.reply_text(f"⚠️ Бюджет на {category}: {spent:.0f}/{budget['amount']:.0f} {budget['currency']} ({pct:.0f}%)")
+
+    # Check total budget
+    total_budget = await get_budget(user_id, "_общий")
+    if total_budget:
+        spent = await get_total_spent(user_id, start, end, currency=total_budget["currency"])
+        pct = spent / total_budget["amount"] * 100 if total_budget["amount"] > 0 else 0
+        if pct >= 100:
+            await message.reply_text(f"🔴 Общий бюджет превышен: {spent:.0f}/{total_budget['amount']:.0f} {total_budget['currency']} ({pct:.0f}%)")
+        elif pct >= 80:
+            await message.reply_text(f"⚠️ Общий бюджет: {spent:.0f}/{total_budget['amount']:.0f} {total_budget['currency']} ({pct:.0f}%)")
 
 
 def _progress_bar(pct: float) -> str:
@@ -416,8 +427,27 @@ async def budget_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
 
     if not context.args:
-        await update.message.reply_text("Формат: /budget еда 20000\nПосмотреть все: /budgets")
+        await update.message.reply_text(
+            "Формат:\n"
+            "/budget 280000 — общий бюджет на месяц\n"
+            "/budget еда 20000 — бюджет на категорию\n"
+            "/budgets — посмотреть все"
+        )
         return
+
+    # /budget 280000 — total budget (first arg is a number)
+    try:
+        total_amount = float(context.args[0])
+        currency = await get_default_currency(user_id)
+        if total_amount <= 0:
+            await delete_budget(user_id, "_общий")
+            await update.message.reply_text("Общий бюджет удалён.")
+        else:
+            await set_budget(user_id, "_общий", total_amount, currency)
+            await update.message.reply_text(f"Общий бюджет: {total_amount:.0f} {currency}/мес")
+        return
+    except ValueError:
+        pass
 
     category = context.args[0].lower()
 
@@ -476,11 +506,16 @@ async def budgets_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     lines = [f"📊 Бюджеты на {now_local.strftime('%B %Y')}\n"]
     for b in budgets:
-        spent = await get_category_total(user_id, b["category"], start, end, currency=b["currency"])
+        if b["category"] == "_общий":
+            spent = await get_total_spent(user_id, start, end, currency=b["currency"])
+            label = "Общий"
+        else:
+            spent = await get_category_total(user_id, b["category"], start, end, currency=b["currency"])
+            label = b["category"]
         pct = spent / b["amount"] * 100 if b["amount"] > 0 else 0
         bar = _progress_bar(pct)
         warn = " 🔴" if pct >= 100 else " ⚠️" if pct >= 80 else ""
-        lines.append(f"{b['category']}: {spent:.0f}/{b['amount']:.0f} {b['currency']} [{bar}] {pct:.0f}%{warn}")
+        lines.append(f"{label}: {spent:.0f}/{b['amount']:.0f} {b['currency']} [{bar}] {pct:.0f}%{warn}")
     await update.message.reply_text("\n".join(lines))
 
 

@@ -201,6 +201,20 @@ async def delete_budget(user_id: int, category: str) -> bool:
         return cursor.rowcount > 0
 
 
+async def get_total_spent(user_id: int, since: datetime, until: datetime,
+                          currency: str | None = None) -> float:
+    async with aiosqlite.connect(DB_PATH) as db:
+        query = ("SELECT COALESCE(SUM(amount), 0) FROM expenses "
+                 "WHERE user_id = ? AND created_at >= ? AND created_at < ?")
+        params: list = [user_id, since.isoformat(), until.isoformat()]
+        if currency:
+            query += " AND currency = ?"
+            params.append(currency)
+        cursor = await db.execute(query, params)
+        row = await cursor.fetchone()
+        return row[0]
+
+
 async def get_category_total(user_id: int, category: str, since: datetime, until: datetime,
                              currency: str | None = None) -> float:
     async with aiosqlite.connect(DB_PATH) as db:
