@@ -16,13 +16,18 @@ from telegram.ext import (
 from database import (
     init_db, save_expense, get_expenses, get_recent_expenses, delete_expense,
     get_default_currency, set_default_currency, get_timezone, set_timezone,
+    set_budget, get_budget, get_all_budgets, delete_budget, get_category_total,
+    set_email_settings, get_email_settings, disable_email, get_all_email_users,
 )
 from ai import (
     parse_receipt_photo,
     parse_text_expense,
     parse_forwarded_expense,
+    parse_email_receipt,
     generate_expense_report,
 )
+from charts import generate_pie_chart, generate_monthly_bars
+from email_parser import fetch_unseen_emails
 
 load_dotenv()
 
@@ -95,13 +100,26 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "📋 /history — последние записи\n"
         "🗑 /delete <id> — удалить запись\n"
         "💱 /currency RSD — валюта по умолчанию\n"
-        "🌍 /timezone CET — часовой пояс\n",
+        "🌍 /timezone CET — часовой пояс\n\n"
+        "*Бюджеты:*\n"
+        "💰 /budget еда 20000 — установить лимит\n"
+        "💰 /budgets — все бюджеты\n\n"
+        "*Графики:*\n"
+        "📈 /chart — круговая диаграмма за месяц\n"
+        "📈 /chart 3 — сравнение 3 месяцев\n\n"
+        "*Почта:*\n"
+        "📧 /email — подключить автосканирование чеков\n"
+        "📧 /email off — отключить\n",
         parse_mode="Markdown",
     )
 
 
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_allowed(update.effective_user.id):
+        return
+
+    # Check if in email setup flow
+    if await handle_email_setup(update, context):
         return
 
     user_id = update.effective_user.id
@@ -121,6 +139,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     eid = await save_expense(user_id, amount, cur, category, description, merchant)
     await update.message.reply_text(f"✅ {_format_expense(parsed)}")
+    await _check_budget_warning(update, user_id, category)
 
 
 async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -147,6 +166,7 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     eid = await save_expense(user_id, amount, currency, category, description, merchant)
     await update.message.reply_text(f"✅ {_format_expense(parsed)}")
+    await _check_budget_warning(update, user_id, category)
 
 
 async def handle_forwarded(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -330,6 +350,298 @@ async def timezone_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(f"Часовой пояс: {tz_name} (сейчас {now_local})")
 
 
+async def _check_budget_warning(update: Update, user_id: int, category: str):
+    """Send warning if expense category is near/over budget."""
+    if not category:
+        return
+    budget = await get_budget(user_id, category)
+    if not budget:
+        return
+    user_tz = await _get_user_tz(user_id)
+    now_local = datetime.now(user_tz)
+    start = datetime(now_local.year, now_local.month, 1, tzinfo=user_tz).astimezone(timezone.utc)
+    if now_local.month == 12:
+        end = datetime(now_local.year + 1, 1, 1, tzinfo=user_tz).astimezone(timezone.utc)
+    else:
+        end = datetime(now_local.year, now_local.month + 1, 1, tzinfo=user_tz).astimezone(timezone.utc)
+    spent = await get_category_total(user_id, category, start, end)
+    pct = spent / budget["amount"] * 100 if budget["amount"] > 0 else 0
+    if pct >= 100:
+        await update.message.reply_text(f"🔴 Бюджет на {category} превышен: {spent:.0f}/{budget['amount']:.0f} {budget['currency']} ({pct:.0f}%)")
+    elif pct >= 80:
+        await update.message.reply_text(f"⚠️ Бюджет на {category}: {spent:.0f}/{budget['amount']:.0f} {budget['currency']} ({pct:.0f}%)")
+
+
+def _progress_bar(pct: float) -> str:
+    filled = min(int(pct / 10), 10)
+    return "█" * filled + "░" * (10 - filled)
+
+
+async def budget_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_allowed(update.effective_user.id):
+        return
+    user_id = update.effective_user.id
+
+    if not context.args:
+        await update.message.reply_text("Формат: /budget еда 20000\nПосмотреть все: /budgets")
+        return
+
+    category = context.args[0].lower()
+
+    # /budget еда — show status
+    if len(context.args) == 1:
+        budget = await get_budget(user_id, category)
+        if not budget:
+            await update.message.reply_text(f"Бюджет на {category} не установлен.")
+            return
+        user_tz = await _get_user_tz(user_id)
+        now_local = datetime.now(user_tz)
+        start = datetime(now_local.year, now_local.month, 1, tzinfo=user_tz).astimezone(timezone.utc)
+        if now_local.month == 12:
+            end = datetime(now_local.year + 1, 1, 1, tzinfo=user_tz).astimezone(timezone.utc)
+        else:
+            end = datetime(now_local.year, now_local.month + 1, 1, tzinfo=user_tz).astimezone(timezone.utc)
+        spent = await get_category_total(user_id, category, start, end)
+        pct = spent / budget["amount"] * 100 if budget["amount"] > 0 else 0
+        bar = _progress_bar(pct)
+        await update.message.reply_text(f"{category}: {spent:.0f}/{budget['amount']:.0f} {budget['currency']} [{bar}] {pct:.0f}%")
+        return
+
+    # /budget еда 20000
+    try:
+        amount = float(context.args[1])
+    except ValueError:
+        await update.message.reply_text("Сумма должна быть числом.")
+        return
+
+    if amount <= 0:
+        await delete_budget(user_id, category)
+        await update.message.reply_text(f"Бюджет на {category} удалён.")
+        return
+
+    currency = await get_default_currency(user_id)
+    await set_budget(user_id, category, amount, currency)
+    await update.message.reply_text(f"Бюджет на {category}: {amount:.0f} {currency}/мес")
+
+
+async def budgets_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_allowed(update.effective_user.id):
+        return
+    user_id = update.effective_user.id
+    budgets = await get_all_budgets(user_id)
+    if not budgets:
+        await update.message.reply_text("Бюджеты не установлены.\nУстановить: /budget еда 20000")
+        return
+
+    user_tz = await _get_user_tz(user_id)
+    now_local = datetime.now(user_tz)
+    start = datetime(now_local.year, now_local.month, 1, tzinfo=user_tz).astimezone(timezone.utc)
+    if now_local.month == 12:
+        end = datetime(now_local.year + 1, 1, 1, tzinfo=user_tz).astimezone(timezone.utc)
+    else:
+        end = datetime(now_local.year, now_local.month + 1, 1, tzinfo=user_tz).astimezone(timezone.utc)
+
+    lines = [f"📊 Бюджеты на {now_local.strftime('%B %Y')}\n"]
+    for b in budgets:
+        spent = await get_category_total(user_id, b["category"], start, end)
+        pct = spent / b["amount"] * 100 if b["amount"] > 0 else 0
+        bar = _progress_bar(pct)
+        warn = " 🔴" if pct >= 100 else " ⚠️" if pct >= 80 else ""
+        lines.append(f"{b['category']}: {spent:.0f}/{b['amount']:.0f} {b['currency']} [{bar}] {pct:.0f}%{warn}")
+    await update.message.reply_text("\n".join(lines))
+
+
+async def chart_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_allowed(update.effective_user.id):
+        return
+    user_id = update.effective_user.id
+    user_tz = await _get_user_tz(user_id)
+    now_local = datetime.now(user_tz)
+
+    # /chart 3 — bar chart for last N months
+    if context.args:
+        try:
+            n_months = int(context.args[0])
+        except ValueError:
+            await update.message.reply_text("Формат: /chart или /chart 3")
+            return
+        n_months = min(n_months, 12)
+        months_data = []
+        for i in range(n_months - 1, -1, -1):
+            m = now_local.month - i
+            y = now_local.year
+            while m <= 0:
+                m += 12
+                y -= 1
+            start = datetime(y, m, 1, tzinfo=user_tz).astimezone(timezone.utc)
+            end_m = m + 1 if m < 12 else 1
+            end_y = y if m < 12 else y + 1
+            end = datetime(end_y, end_m, 1, tzinfo=user_tz).astimezone(timezone.utc)
+            expenses = await get_expenses(user_id, since=start, until=end)
+            total = sum(e["amount"] for e in expenses)
+            month_label = datetime(y, m, 1).strftime("%b %Y")
+            months_data.append({"month": month_label, "total": total})
+
+        currency = await get_default_currency(user_id)
+        buf = generate_monthly_bars(months_data, currency)
+        if buf:
+            await update.message.reply_photo(photo=buf)
+        else:
+            await update.message.reply_text("Нет данных для графика.")
+        return
+
+    # /chart — pie chart for current month
+    start = datetime(now_local.year, now_local.month, 1, tzinfo=user_tz).astimezone(timezone.utc)
+    if now_local.month == 12:
+        end = datetime(now_local.year + 1, 1, 1, tzinfo=user_tz).astimezone(timezone.utc)
+    else:
+        end = datetime(now_local.year, now_local.month + 1, 1, tzinfo=user_tz).astimezone(timezone.utc)
+
+    expenses = await get_expenses(user_id, since=start, until=end)
+    if not expenses:
+        await update.message.reply_text("Нет расходов за этот месяц.")
+        return
+
+    by_category: dict[str, float] = {}
+    for e in expenses:
+        cat = e.get("category") or "другое"
+        by_category[cat] = by_category.get(cat, 0) + e["amount"]
+
+    currency = await get_default_currency(user_id)
+    period = now_local.strftime("%B %Y")
+    buf = generate_pie_chart(by_category, currency, period)
+    if buf:
+        await update.message.reply_photo(photo=buf)
+    else:
+        await update.message.reply_text("Не удалось создать график.")
+
+
+# --- Email ---
+
+EMAIL_SETUP_STEP = {}  # user_id -> {"step": 1/2/3, "server": ..., "address": ...}
+
+IMAP_HINTS = {
+    "gmail.com": "imap.gmail.com",
+    "googlemail.com": "imap.gmail.com",
+    "outlook.com": "outlook.office365.com",
+    "hotmail.com": "outlook.office365.com",
+    "yahoo.com": "imap.mail.yahoo.com",
+    "mail.ru": "imap.mail.ru",
+    "yandex.ru": "imap.yandex.ru",
+}
+
+
+async def email_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_allowed(update.effective_user.id):
+        return
+    user_id = update.effective_user.id
+
+    if context.args and context.args[0].lower() == "off":
+        await disable_email(user_id)
+        await update.message.reply_text("Сканирование почты отключено.")
+        return
+
+    if context.args and context.args[0].lower() == "status":
+        settings = await get_email_settings(user_id)
+        if settings:
+            await update.message.reply_text(f"Почта: {settings['email_address']}\nСервер: {settings['email_server']}\nСтатус: активна")
+        else:
+            await update.message.reply_text("Почта не подключена.")
+        return
+
+    # Start setup flow
+    EMAIL_SETUP_STEP[user_id] = {"step": 1}
+    await update.message.reply_text(
+        "Настройка почты. Шаг 1/3:\n\n"
+        "Введи email адрес:"
+    )
+
+
+async def handle_email_setup(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
+    """Handle email setup conversation. Returns True if message was consumed."""
+    user_id = update.effective_user.id
+    if user_id not in EMAIL_SETUP_STEP:
+        return False
+
+    step_data = EMAIL_SETUP_STEP[user_id]
+    text = update.message.text.strip()
+
+    if step_data["step"] == 1:
+        # Got email address, guess IMAP server
+        step_data["address"] = text
+        domain = text.split("@")[-1].lower() if "@" in text else ""
+        guessed = IMAP_HINTS.get(domain)
+        if guessed:
+            step_data["server"] = guessed
+            step_data["step"] = 3
+            await update.message.reply_text(
+                f"Сервер: {guessed}\n\n"
+                "Шаг 2/2: Введи App Password\n"
+                "(Для Gmail: myaccount.google.com → Security → App passwords)"
+            )
+        else:
+            step_data["step"] = 2
+            await update.message.reply_text("Шаг 2/3: Введи IMAP-сервер (например imap.gmail.com):")
+        return True
+
+    if step_data["step"] == 2:
+        step_data["server"] = text
+        step_data["step"] = 3
+        await update.message.reply_text(
+            "Шаг 3/3: Введи App Password\n"
+            "(Для Gmail: myaccount.google.com → Security → App passwords)"
+        )
+        return True
+
+    if step_data["step"] == 3:
+        password = text
+        server = step_data["server"]
+        address = step_data["address"]
+        del EMAIL_SETUP_STEP[user_id]
+
+        # Test connection
+        try:
+            import imaplib
+            mail = imaplib.IMAP4_SSL(server)
+            mail.login(address, password)
+            mail.logout()
+        except Exception as e:
+            await update.message.reply_text(f"Не удалось подключиться: {e}\nПопробуй ещё раз: /email")
+            return True
+
+        await set_email_settings(user_id, server, address, password)
+        await update.message.reply_text(
+            f"Почта подключена: {address}\n"
+            "Бот будет проверять новые чеки каждые 15 минут.\n"
+            "Отключить: /email off"
+        )
+        return True
+
+    return False
+
+
+async def check_emails_job(context: ContextTypes.DEFAULT_TYPE):
+    """Periodic job: check all users' emails for receipts."""
+    users = await get_all_email_users()
+    for u in users:
+        user_id = u["user_id"]
+        try:
+            emails = fetch_unseen_emails(u["email_server"], u["email_address"], u["email_password"])
+            currency = await get_default_currency(user_id)
+            for em in emails:
+                parsed = await parse_email_receipt(em["from"], em["subject"], em["body"], currency)
+                if not parsed or "amount" not in parsed:
+                    continue
+                amount = float(parsed["amount"])
+                cur = parsed.get("currency", currency)
+                await save_expense(user_id, amount, cur,
+                                   parsed.get("category"), parsed.get("description"), parsed.get("merchant"))
+                text = _format_expense(parsed)
+                await context.bot.send_message(chat_id=user_id, text=f"📧 Чек из почты:\n✅ {text}")
+        except Exception as e:
+            logger.error(f"Email check failed for {user_id}: {e}")
+
+
 # --- Main ---
 
 async def main():
@@ -350,6 +662,10 @@ async def main():
     app.add_handler(CommandHandler("delete", delete_cmd))
     app.add_handler(CommandHandler("currency", currency_cmd))
     app.add_handler(CommandHandler("timezone", timezone_cmd))
+    app.add_handler(CommandHandler("budget", budget_cmd))
+    app.add_handler(CommandHandler("budgets", budgets_cmd))
+    app.add_handler(CommandHandler("chart", chart_cmd))
+    app.add_handler(CommandHandler("email", email_cmd))
     app.add_handler(MessageHandler(filters.FORWARDED, handle_forwarded))
     app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
@@ -365,7 +681,14 @@ async def main():
             BotCommand("delete", "Удалить расход"),
             BotCommand("currency", "Валюта по умолчанию"),
             BotCommand("timezone", "Часовой пояс"),
+            BotCommand("budget", "Бюджет по категории"),
+            BotCommand("budgets", "Все бюджеты"),
+            BotCommand("chart", "График расходов"),
+            BotCommand("email", "Подключить почту"),
         ])
+
+        app.job_queue.run_repeating(check_emails_job, interval=900, first=30, name="email_check")
+        logger.info("Email check scheduled (every 15 min)")
 
         await app.start()
         await app.updater.start_polling(allowed_updates=Update.ALL_TYPES)

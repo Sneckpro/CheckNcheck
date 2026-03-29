@@ -103,6 +103,37 @@ async def parse_forwarded_expense(text: str, default_currency: str = "RSD") -> d
         return None
 
 
+async def parse_email_receipt(sender: str, subject: str, body: str,
+                              default_currency: str = "RSD") -> dict | None:
+    text = f"From: {sender}\nSubject: {subject}\n\n{body[:2000]}"
+    response = client.chat.completions.create(
+        model=MODEL,
+        max_tokens=256,
+        response_format={"type": "json_object"},
+        messages=[
+            {"role": "system", "content": (
+                "Extract expense/payment data from this email. "
+                f"Default currency: {default_currency}. "
+                "Return JSON with fields:\n"
+                '- "amount": number\n'
+                '- "currency": string (3-letter code)\n'
+                f'- "category": one of {CATEGORIES}\n'
+                '- "description": string\n'
+                '- "merchant": string or null\n\n'
+                "If this email is NOT a receipt/payment/order confirmation, return {\"error\": true}."
+            )},
+            {"role": "user", "content": text},
+        ],
+    )
+    try:
+        result = json.loads(response.choices[0].message.content)
+        if result.get("error"):
+            return None
+        return result
+    except (json.JSONDecodeError, KeyError):
+        return None
+
+
 async def generate_expense_report(expenses: list[dict], period_name: str) -> str:
     if not expenses:
         return f"Нет расходов за {period_name}."

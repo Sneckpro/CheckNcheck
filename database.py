@@ -26,6 +26,21 @@ async def init_db():
                 timezone TEXT
             )
         """)
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS budgets (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER NOT NULL,
+                category TEXT NOT NULL,
+                amount REAL NOT NULL,
+                currency TEXT NOT NULL,
+                UNIQUE(user_id, category)
+            )
+        """)
+        for col in ("email_server TEXT", "email_address TEXT", "email_password TEXT", "email_enabled INTEGER DEFAULT 0"):
+            try:
+                await db.execute(f"ALTER TABLE user_settings ADD COLUMN {col}")
+            except Exception:
+                pass
         await db.commit()
 
 
@@ -122,3 +137,101 @@ async def set_timezone(user_id: int, tz: str):
             (user_id, tz, tz),
         )
         await db.commit()
+
+
+# --- Budgets ---
+
+async def set_budget(user_id: int, category: str, amount: float, currency: str):
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            "INSERT INTO budgets (user_id, category, amount, currency) VALUES (?, ?, ?, ?) "
+            "ON CONFLICT(user_id, category) DO UPDATE SET amount = ?, currency = ?",
+            (user_id, category, amount, currency, amount, currency),
+        )
+        await db.commit()
+
+
+async def get_budget(user_id: int, category: str) -> dict | None:
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        cursor = await db.execute(
+            "SELECT category, amount, currency FROM budgets WHERE user_id = ? AND category = ?",
+            (user_id, category),
+        )
+        row = await cursor.fetchone()
+        return dict(row) if row else None
+
+
+async def get_all_budgets(user_id: int) -> list[dict]:
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        cursor = await db.execute(
+            "SELECT category, amount, currency FROM budgets WHERE user_id = ? ORDER BY amount DESC",
+            (user_id,),
+        )
+        rows = await cursor.fetchall()
+        return [dict(row) for row in rows]
+
+
+async def delete_budget(user_id: int, category: str) -> bool:
+    async with aiosqlite.connect(DB_PATH) as db:
+        cursor = await db.execute(
+            "DELETE FROM budgets WHERE user_id = ? AND category = ?", (user_id, category)
+        )
+        await db.commit()
+        return cursor.rowcount > 0
+
+
+async def get_category_total(user_id: int, category: str, since: datetime, until: datetime) -> float:
+    async with aiosqlite.connect(DB_PATH) as db:
+        cursor = await db.execute(
+            "SELECT COALESCE(SUM(amount), 0) FROM expenses "
+            "WHERE user_id = ? AND category = ? AND created_at >= ? AND created_at < ?",
+            (user_id, category, since.isoformat(), until.isoformat()),
+        )
+        row = await cursor.fetchone()
+        return row[0]
+
+
+# --- Email settings ---
+
+async def set_email_settings(user_id: int, server: str, address: str, password: str):
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            "INSERT INTO user_settings (user_id, email_server, email_address, email_password, email_enabled) "
+            "VALUES (?, ?, ?, ?, 1) "
+            "ON CONFLICT(user_id) DO UPDATE SET email_server = ?, email_address = ?, email_password = ?, email_enabled = 1",
+            (user_id, server, address, password, server, address, password),
+        )
+        await db.commit()
+
+
+async def get_email_settings(user_id: int) -> dict | None:
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        cursor = await db.execute(
+            "SELECT email_server, email_address, email_password, email_enabled "
+            "FROM user_settings WHERE user_id = ? AND email_enabled = 1",
+            (user_id,),
+        )
+        row = await cursor.fetchone()
+        return dict(row) if row else None
+
+
+async def disable_email(user_id: int):
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            "UPDATE user_settings SET email_enabled = 0 WHERE user_id = ?", (user_id,)
+        )
+        await db.commit()
+
+
+async def get_all_email_users() -> list[dict]:
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        cursor = await db.execute(
+            "SELECT user_id, email_server, email_address, email_password "
+            "FROM user_settings WHERE email_enabled = 1"
+        )
+        rows = await cursor.fetchall()
+        return [dict(row) for row in rows]
