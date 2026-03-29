@@ -618,13 +618,21 @@ async def handle_email_setup(update: Update, context: ContextTypes.DEFAULT_TYPE)
         step_data["address"] = text
         domain = text.split("@")[-1].lower() if "@" in text else ""
         guessed = IMAP_HINTS.get(domain)
+        APP_PASSWORD_HINTS = {
+            "imap.gmail.com": "Для Gmail: myaccount.google.com → Security → App passwords",
+            "imap.yandex.ru": "Для Яндекс: id.yandex.ru → Безопасность → Пароли приложений",
+            "outlook.office365.com": "Для Outlook: account.microsoft.com → Security → App passwords",
+            "imap.mail.yahoo.com": "Для Yahoo: login.yahoo.com → Account Security → App passwords",
+            "imap.mail.ru": "Для Mail.ru: id.mail.ru → Безопасность → Пароли приложений",
+        }
         if guessed:
             step_data["server"] = guessed
             step_data["step"] = 3
+            hint = APP_PASSWORD_HINTS.get(guessed, "Создай пароль приложения в настройках безопасности почты")
             await update.message.reply_text(
                 f"Сервер: {guessed}\n\n"
-                "Шаг 2/2: Введи App Password\n"
-                "(Для Gmail: myaccount.google.com → Security → App passwords)"
+                f"Шаг 2/2: Введи App Password\n"
+                f"({hint})"
             )
         else:
             step_data["step"] = 2
