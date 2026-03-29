@@ -212,11 +212,33 @@ async def month_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     user_tz = await _get_user_tz(user_id)
     now_local = datetime.now(user_tz)
-    start_of_month = datetime(now_local.year, now_local.month, 1, tzinfo=user_tz)
-    since_utc = start_of_month.astimezone(timezone.utc)
 
-    month_name = now_local.strftime("%B %Y")
-    expenses = await get_expenses(user_id, since=since_utc)
+    # /month 2 → February, /month 12 → December
+    if context.args:
+        try:
+            month = int(context.args[0])
+            if not 1 <= month <= 12:
+                await update.message.reply_text("Месяц от 1 до 12.")
+                return
+            year = now_local.year if month <= now_local.month else now_local.year - 1
+        except ValueError:
+            await update.message.reply_text("Формат: /month или /month 2")
+            return
+    else:
+        month = now_local.month
+        year = now_local.year
+
+    start_of_month = datetime(year, month, 1, tzinfo=user_tz)
+    if month == 12:
+        end_of_month = datetime(year + 1, 1, 1, tzinfo=user_tz)
+    else:
+        end_of_month = datetime(year, month + 1, 1, tzinfo=user_tz)
+
+    since_utc = start_of_month.astimezone(timezone.utc)
+    until_utc = end_of_month.astimezone(timezone.utc)
+
+    month_name = start_of_month.strftime("%B %Y")
+    expenses = await get_expenses(user_id, since=since_utc, until=until_utc)
     report = await generate_expense_report(expenses, month_name)
     await update.message.reply_text(report)
 

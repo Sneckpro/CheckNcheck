@@ -43,21 +43,24 @@ async def save_expense(user_id: int, amount: float, currency: str,
         return cursor.lastrowid
 
 
-async def get_expenses(user_id: int, since: datetime | None = None) -> list[dict]:
+async def get_expenses(user_id: int, since: datetime | None = None,
+                       until: datetime | None = None) -> list[dict]:
     async with aiosqlite.connect(DB_PATH) as db:
         db.row_factory = aiosqlite.Row
+        conditions = ["user_id = ?"]
+        params: list = [user_id]
         if since:
-            cursor = await db.execute(
-                "SELECT id, amount, currency, category, description, merchant, created_at "
-                "FROM expenses WHERE user_id = ? AND created_at >= ? ORDER BY created_at ASC",
-                (user_id, since.isoformat()),
-            )
-        else:
-            cursor = await db.execute(
-                "SELECT id, amount, currency, category, description, merchant, created_at "
-                "FROM expenses WHERE user_id = ? ORDER BY created_at ASC",
-                (user_id,),
-            )
+            conditions.append("created_at >= ?")
+            params.append(since.isoformat())
+        if until:
+            conditions.append("created_at < ?")
+            params.append(until.isoformat())
+        where = " AND ".join(conditions)
+        cursor = await db.execute(
+            f"SELECT id, amount, currency, category, description, merchant, created_at "
+            f"FROM expenses WHERE {where} ORDER BY created_at ASC",
+            params,
+        )
         rows = await cursor.fetchall()
         return [dict(row) for row in rows]
 
