@@ -104,6 +104,13 @@ async def get_recent_expenses(user_id: int, limit: int = 10) -> list[dict]:
         return [dict(row) for row in rows]
 
 
+async def clear_all_expenses(user_id: int) -> int:
+    async with aiosqlite.connect(DB_PATH) as db:
+        cursor = await db.execute("DELETE FROM expenses WHERE user_id = ?", (user_id,))
+        await db.commit()
+        return cursor.rowcount
+
+
 async def delete_expense(expense_id: int, user_id: int) -> bool:
     async with aiosqlite.connect(DB_PATH) as db:
         cursor = await db.execute(

@@ -134,9 +134,12 @@ async def parse_email_receipt(sender: str, subject: str, body: str,
         return None
 
 
-async def generate_expense_report(expenses: list[dict], period_name: str) -> str:
+async def generate_expense_report(expenses: list[dict], period_name: str,
+                                   target_currency: str | None = None) -> str:
     if not expenses:
         return f"Нет расходов за {period_name}."
+
+    from currency import convert
 
     EMOJI = {
         "еда": "\U0001f354", "продукты": "\U0001f6d2", "транспорт": "\U0001f697",
@@ -145,28 +148,35 @@ async def generate_expense_report(expenses: list[dict], period_name: str) -> str
         "подписки": "\U0001f4f1", "другое": "\U0001f4cc",
     }
 
-    # Group by currency, then by category
-    by_currency: dict[str, dict[str, float]] = {}
-    totals: dict[str, float] = {}
+    # Group by category, convert to target currency if set
+    by_category: dict[str, float] = {}
+    total = 0.0
+    display_cur = target_currency or "RSD"
+    has_mixed = len(set(e.get("currency", "RSD") for e in expenses)) > 1
+
     for e in expenses:
-        cur = e.get("currency", "RSD")
         cat = e.get("category") or "другое"
-        if cur not in by_currency:
-            by_currency[cur] = {}
-            totals[cur] = 0.0
-        by_currency[cur][cat] = by_currency[cur].get(cat, 0) + e["amount"]
-        totals[cur] += e["amount"]
+        amount = e["amount"]
+        cur = e.get("currency", "RSD")
+
+        if target_currency and cur != target_currency:
+            converted = convert(amount, cur, target_currency)
+            if converted is not None:
+                amount = converted
+            # else keep original — can't convert
+        elif not target_currency:
+            display_cur = cur
+
+        by_category[cat] = by_category.get(cat, 0) + amount
+        total += amount
 
     lines = [f"📊 Расходы за {period_name}\n"]
-    for cur, cats in by_currency.items():
-        if len(by_currency) > 1:
-            lines.append(f"— {cur} —")
-        for cat, amount in sorted(cats.items(), key=lambda x: -x[1]):
-            emoji = EMOJI.get(cat, "📌")
-            lines.append(f"{emoji} {cat.capitalize()}: {amount:.2f} {cur}")
-        lines.append("─────────────")
-        lines.append(f"💰 Итого: {totals[cur]:.2f} {cur}")
-        if len(by_currency) > 1:
-            lines.append("")
+    for cat, amount in sorted(by_category.items(), key=lambda x: -x[1]):
+        emoji = EMOJI.get(cat, "📌")
+        lines.append(f"{emoji} {cat.capitalize()}: {amount:.2f} {display_cur}")
+    lines.append("─────────────")
+    lines.append(f"💰 Итого: {total:.2f} {display_cur}")
+    if has_mixed and target_currency:
+        lines.append(f"(конвертировано в {target_currency} по текущему курсу)")
 
     return "\n".join(lines)

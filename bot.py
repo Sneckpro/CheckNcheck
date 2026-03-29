@@ -16,7 +16,7 @@ from telegram.ext import (
 )
 
 from database import (
-    init_db, save_expense, get_expenses, get_recent_expenses, delete_expense,
+    init_db, save_expense, get_expenses, get_recent_expenses, delete_expense, clear_all_expenses,
     get_default_currency, set_default_currency, get_timezone, set_timezone,
     set_budget, get_budget, get_all_budgets, delete_budget, get_category_total,
     set_email_settings, get_email_settings, disable_email, get_all_email_users,
@@ -218,7 +218,8 @@ async def today_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     since_utc = start_of_day.astimezone(timezone.utc)
 
     expenses = await get_expenses(user_id, since=since_utc)
-    report = await generate_expense_report(expenses, "сегодня")
+    currency = await get_default_currency(user_id)
+    report = await generate_expense_report(expenses, "сегодня", target_currency=currency)
     await update.message.reply_text(report)
 
 
@@ -231,7 +232,8 @@ async def week_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     start_of_today = datetime(now_local.year, now_local.month, now_local.day, tzinfo=user_tz)
     since = (start_of_today - timedelta(days=6)).astimezone(timezone.utc)
     expenses = await get_expenses(user_id, since=since)
-    report = await generate_expense_report(expenses, "неделю")
+    currency = await get_default_currency(user_id)
+    report = await generate_expense_report(expenses, "неделю", target_currency=currency)
     await update.message.reply_text(report)
 
 
@@ -268,7 +270,8 @@ async def month_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     month_name = start_of_month.strftime("%B %Y")
     expenses = await get_expenses(user_id, since=since_utc, until=until_utc)
-    report = await generate_expense_report(expenses, month_name)
+    currency = await get_default_currency(user_id)
+    report = await generate_expense_report(expenses, month_name, target_currency=currency)
     await update.message.reply_text(report)
 
 
@@ -293,6 +296,14 @@ async def history_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         lines.append(f"{e['id']} — {_format_expense(e)}")
     lines.append("\nУдалить: /delete <id>")
     await update.message.reply_text("\n".join(lines))
+
+
+async def clearall_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_allowed(update.effective_user.id):
+        return
+    deleted = await clear_all_expenses(update.effective_user.id)
+    await clear_processed_emails(update.effective_user.id)
+    await update.message.reply_text(f"Удалено расходов: {deleted}. История и обработанные письма очищены.")
 
 
 async def delete_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -792,6 +803,7 @@ async def main():
     app.add_handler(CommandHandler("month", month_cmd))
     app.add_handler(CommandHandler("history", history_cmd))
     app.add_handler(CommandHandler("delete", delete_cmd))
+    app.add_handler(CommandHandler("clearall", clearall_cmd))
     app.add_handler(CommandHandler("currency", currency_cmd))
     app.add_handler(CommandHandler("timezone", timezone_cmd))
     app.add_handler(CommandHandler("budget", budget_cmd))
