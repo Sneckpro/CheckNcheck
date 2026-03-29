@@ -82,10 +82,23 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_allowed(update.effective_user.id):
         return
     await update.message.reply_text(
-        "Привет! Я трекер расходов.\n\n"
-        "Просто напиши: кофе 350\n"
-        "Или сфоткай чек.\n\n"
-        "/help — все команды"
+        "👋 Привет! Я помогу отслеживать расходы.\n\n"
+        "🚀 *Быстрый старт:*\n\n"
+        "*1.* Установи часовой пояс:\n"
+        "   /timezone CET\n\n"
+        "*2.* Установи валюту (по умолчанию RSD):\n"
+        "   /currency EUR\n\n"
+        "*3.* Добавь расход любым способом:\n"
+        "   • Напиши: `кофе 350`\n"
+        "   • Сфоткай чек\n"
+        "   • Перешли подтверждение заказа\n\n"
+        "*4.* Смотри отчёты:\n"
+        "   /today — за сегодня\n"
+        "   /week — за неделю\n"
+        "   /month — за месяц\n\n"
+        "📧 Бонус: подключи почту (/email) — бот сам найдёт чеки от Wolt, Bolt, Amazon и других.\n\n"
+        "/help — полный список команд",
+        parse_mode="Markdown",
     )
 
 
