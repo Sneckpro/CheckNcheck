@@ -120,6 +120,9 @@ async def parse_email_receipt(sender: str, subject: str, body: str,
                 f'- "category": one of {CATEGORIES}\n'
                 '- "description": string\n'
                 '- "merchant": string or null\n\n'
+                "IMPORTANT: Only extract OUTGOING expenses (purchases, orders, subscriptions, deliveries). "
+                "If this email is about INCOMING money (salary, payroll, refund, cashback, "
+                "bank transfer TO user, payment FROM employer/company to user), return {\"error\": true}.\n"
                 "If this email is NOT a receipt/payment/order confirmation, return {\"error\": true}."
             )},
             {"role": "user", "content": text},
