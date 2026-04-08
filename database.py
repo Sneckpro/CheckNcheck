@@ -50,9 +50,24 @@ async def init_db():
                 await db.execute(f"ALTER TABLE user_settings ADD COLUMN {col}")
             except Exception:
                 pass
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS subscriptions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER NOT NULL,
+                name TEXT NOT NULL,
+                amount REAL NOT NULL,
+                currency TEXT NOT NULL,
+                category TEXT DEFAULT 'подписки',
+                day_of_month INTEGER NOT NULL DEFAULT 1,
+                active INTEGER NOT NULL DEFAULT 1,
+                last_charged_at TEXT,
+                created_at TEXT NOT NULL
+            )
+        """)
         await db.execute("CREATE INDEX IF NOT EXISTS idx_expenses_user_date ON expenses(user_id, created_at)")
         await db.execute("CREATE INDEX IF NOT EXISTS idx_expenses_user_cat_date ON expenses(user_id, category, created_at)")
         await db.execute("CREATE INDEX IF NOT EXISTS idx_processed_emails_user_uid ON processed_emails(user_id, email_uid)")
+        await db.execute("CREATE INDEX IF NOT EXISTS idx_subscriptions_user ON subscriptions(user_id, active)")
         await db.commit()
 
 
@@ -104,6 +119,21 @@ async def get_recent_expenses(user_id: int, limit: int = 10) -> list[dict]:
         return [dict(row) for row in rows]
 
 
+async def search_expenses(user_id: int, query: str, limit: int = 20) -> list[dict]:
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        q = query.lower().replace("%", "\\%").replace("_", "\\_")
+        pattern = f"%{q}%"
+        cursor = await db.execute(
+            "SELECT id, amount, currency, category, description, merchant, created_at "
+            "FROM expenses WHERE user_id = ? AND (LOWER(description) LIKE ? ESCAPE '\\' "
+            "OR LOWER(merchant) LIKE ? ESCAPE '\\') ORDER BY created_at DESC LIMIT ?",
+            (user_id, pattern, pattern, limit),
+        )
+        rows = await cursor.fetchall()
+        return [dict(row) for row in rows]
+
+
 async def get_top_expenses(user_id: int, since: datetime, until: datetime,
                            limit: int = 5) -> list[dict]:
     async with aiosqlite.connect(DB_PATH) as db:
@@ -116,6 +146,36 @@ async def get_top_expenses(user_id: int, since: datetime, until: datetime,
         )
         rows = await cursor.fetchall()
         return [dict(row) for row in rows]
+
+
+async def get_expense_by_id(expense_id: int, user_id: int) -> dict | None:
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        cursor = await db.execute(
+            "SELECT id, amount, currency, category, description, merchant, created_at "
+            "FROM expenses WHERE id = ? AND user_id = ?",
+            (expense_id, user_id),
+        )
+        row = await cursor.fetchone()
+        return dict(row) if row else None
+
+
+UPDATABLE_FIELDS = {"amount", "currency", "category", "description", "merchant"}
+
+
+async def update_expense(expense_id: int, user_id: int, **fields) -> bool:
+    updates = {k: v for k, v in fields.items() if k in UPDATABLE_FIELDS}
+    if not updates:
+        return False
+    async with aiosqlite.connect(DB_PATH) as db:
+        set_clause = ", ".join(f"{k} = ?" for k in updates)
+        params = list(updates.values()) + [expense_id, user_id]
+        cursor = await db.execute(
+            f"UPDATE expenses SET {set_clause} WHERE id = ? AND user_id = ?",
+            params,
+        )
+        await db.commit()
+        return cursor.rowcount > 0
 
 
 async def clear_all_expenses(user_id: int) -> int:
@@ -243,6 +303,13 @@ async def get_category_total(user_id: int, category: str, since: datetime, until
         return row[0]
 
 
+async def get_all_active_users() -> list[int]:
+    async with aiosqlite.connect(DB_PATH) as db:
+        cursor = await db.execute("SELECT DISTINCT user_id FROM expenses")
+        rows = await cursor.fetchall()
+        return [row[0] for row in rows]
+
+
 # --- Email settings ---
 
 async def set_email_settings(user_id: int, server: str, address: str, password: str):
@@ -312,3 +379,61 @@ async def clear_processed_emails(user_id: int) -> int:
         )
         await db.commit()
         return cursor.rowcount
+
+
+# --- Subscriptions ---
+
+async def add_subscription(user_id: int, name: str, amount: float, currency: str,
+                           category: str = "подписки", day_of_month: int = 1) -> int:
+    async with aiosqlite.connect(DB_PATH) as db:
+        cursor = await db.execute(
+            "INSERT INTO subscriptions (user_id, name, amount, currency, category, day_of_month, created_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (user_id, name, amount, currency, category, day_of_month,
+             datetime.now(timezone.utc).isoformat()),
+        )
+        await db.commit()
+        return cursor.lastrowid
+
+
+async def get_active_subscriptions(user_id: int) -> list[dict]:
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        cursor = await db.execute(
+            "SELECT id, name, amount, currency, category, day_of_month, last_charged_at "
+            "FROM subscriptions WHERE user_id = ? AND active = 1 ORDER BY day_of_month",
+            (user_id,),
+        )
+        rows = await cursor.fetchall()
+        return [dict(row) for row in rows]
+
+
+async def deactivate_subscription(user_id: int, name: str) -> bool:
+    async with aiosqlite.connect(DB_PATH) as db:
+        cursor = await db.execute(
+            "UPDATE subscriptions SET active = 0 WHERE user_id = ? AND LOWER(name) = LOWER(?) AND active = 1",
+            (user_id, name),
+        )
+        await db.commit()
+        return cursor.rowcount > 0
+
+
+async def get_all_due_subscriptions() -> list[dict]:
+    """Get all active subscriptions with user_id for the daily job."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        cursor = await db.execute(
+            "SELECT id, user_id, name, amount, currency, category, day_of_month, last_charged_at "
+            "FROM subscriptions WHERE active = 1"
+        )
+        rows = await cursor.fetchall()
+        return [dict(row) for row in rows]
+
+
+async def mark_subscription_charged(sub_id: int, charged_at: str):
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            "UPDATE subscriptions SET last_charged_at = ? WHERE id = ?",
+            (charged_at, sub_id),
+        )
+        await db.commit()

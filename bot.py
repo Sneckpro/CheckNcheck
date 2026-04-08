@@ -18,13 +18,17 @@ from telegram.ext import (
 
 from database import (
     init_db, save_expense, get_expenses, get_recent_expenses, delete_expense, clear_all_expenses, get_top_expenses,
+    search_expenses, get_expense_by_id, update_expense, get_all_active_users,
     get_default_currency, set_default_currency, get_timezone, set_timezone,
     set_budget, get_budget, get_all_budgets, delete_budget, get_category_total,
     set_email_settings, get_email_settings, disable_email, get_all_email_users,
     is_email_processed, mark_email_processed, clear_processed_emails,
     get_total_spent,
+    add_subscription, get_active_subscriptions, deactivate_subscription,
+    get_all_due_subscriptions, mark_subscription_charged,
 )
 from ai import (
+    CATEGORIES,
     parse_receipt_photo,
     parse_text_expense,
     parse_forwarded_expense,
@@ -118,12 +122,18 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "📊 /week — расходы за неделю\n"
         "📊 /month — отчёт за месяц\n"
         "📋 /history — последние записи\n"
+        "🔍 /search <запрос> — поиск расходов\n"
+        "✏️ /edit <id> <значение> — редактировать\n"
         "🗑 /delete <id> — удалить запись\n"
         "💱 /currency RSD — валюта по умолчанию\n"
         "🌍 /timezone CET — часовой пояс\n\n"
         "*Бюджеты:*\n"
         "💰 /budget еда 20000 — установить лимит\n"
         "💰 /budgets — все бюджеты\n\n"
+        "*Подписки:*\n"
+        "📌 /sub Netflix 1500 — добавить подписку\n"
+        "📌 /subs — мои подписки\n"
+        "📌 /unsub Netflix — отменить\n\n"
         "*Графики:*\n"
         "📈 /chart — круговая диаграмма за месяц\n"
         "📈 /chart 3 — сравнение 3 месяцев\n\n"
@@ -379,6 +389,26 @@ async def history_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("\n".join(lines))
 
 
+async def search_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_allowed(update.effective_user.id):
+        return
+    if not context.args:
+        await update.message.reply_text("Использование: /search <запрос>\nПример: /search кофе")
+        return
+
+    query = " ".join(context.args)
+    results = await search_expenses(update.effective_user.id, query)
+    if not results:
+        await update.message.reply_text(f"Ничего не найдено: {query}")
+        return
+
+    lines = [f"🔍 Результаты по «{query}»:\n"]
+    for e in results:
+        lines.append(f"{e['id']} — {_format_expense(e)}")
+    lines.append(f"\nНайдено: {len(results)}")
+    await update.message.reply_text("\n".join(lines))
+
+
 async def clearall_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_allowed(update.effective_user.id):
         return
@@ -404,6 +434,88 @@ async def delete_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"Расход #{eid} удалён.")
     else:
         await update.message.reply_text("Расход не найден.")
+
+
+FIELD_ALIASES = {
+    "amount": "amount", "сумма": "amount",
+    "category": "category", "категория": "category",
+    "description": "description", "описание": "description",
+    "merchant": "merchant", "магазин": "merchant",
+    "currency": "currency", "валюта": "currency",
+}
+
+
+async def edit_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_allowed(update.effective_user.id):
+        return
+    if not context.args or len(context.args) < 2:
+        await update.message.reply_text(
+            "Использование:\n"
+            "/edit <id> <сумма> — изменить сумму\n"
+            "/edit <id> <категория> — изменить категорию\n"
+            "/edit <id> сумма 500\n"
+            "/edit <id> категория еда"
+        )
+        return
+
+    try:
+        eid = int(context.args[0])
+    except ValueError:
+        await update.message.reply_text("ID должен быть числом.")
+        return
+
+    user_id = update.effective_user.id
+    expense = await get_expense_by_id(eid, user_id)
+    if not expense:
+        await update.message.reply_text("Расход не найден.")
+        return
+
+    changes = {}
+    rest = context.args[1:]
+
+    # Explicit field: /edit 42 amount 500
+    if rest[0].lower() in FIELD_ALIASES:
+        if len(rest) < 2:
+            await update.message.reply_text(f"Укажи значение: /edit {eid} {rest[0]} <значение>")
+            return
+        field = FIELD_ALIASES[rest[0].lower()]
+        value = " ".join(rest[1:])
+        if field == "amount":
+            try:
+                changes["amount"] = float(value)
+                if changes["amount"] <= 0:
+                    await update.message.reply_text("Сумма должна быть больше нуля.")
+                    return
+            except ValueError:
+                await update.message.reply_text("Некорректная сумма.")
+                return
+        elif field == "currency":
+            changes["currency"] = value.upper()[:3]
+        elif field == "category":
+            changes["category"] = value.lower()
+        else:
+            changes[field] = value
+    else:
+        # Smart mode: /edit 42 500 or /edit 42 еда
+        value = " ".join(rest)
+        try:
+            amount = float(value)
+            if amount <= 0:
+                await update.message.reply_text("Сумма должна быть больше нуля.")
+                return
+            changes["amount"] = amount
+        except ValueError:
+            if value.lower() in CATEGORIES:
+                changes["category"] = value.lower()
+            else:
+                changes["description"] = value
+
+    await update_expense(eid, user_id, **changes)
+    updated = await get_expense_by_id(eid, user_id)
+    await update.message.reply_text(f"Обновлено: {_format_expense(updated)}")
+
+    if "category" in changes:
+        await _check_budget_warning(update.message, user_id, changes["category"])
 
 
 async def currency_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -870,7 +982,12 @@ async def _scan_emails(context, user_id: int, settings: dict,
         parsed = await parse_email_receipt(em["from"], em["subject"], em["body"], currency)
         await mark_email_processed(user_id, em["uid"])
         if not parsed or "amount" not in parsed:
+            logger.info("Email NOT parsed as expense: from=%s subj=%s parsed=%s",
+                        em["from"][:50], em["subject"][:60], parsed)
             continue
+        logger.info("Email parsed OK: from=%s subj=%s amount=%s %s",
+                    em["from"][:50], em["subject"][:60],
+                    parsed.get("amount"), parsed.get("currency"))
         amount = float(parsed["amount"])
         cur = parsed.get("currency", currency)
         category = (parsed.get("category") or "").lower() or None
@@ -900,6 +1017,260 @@ async def check_emails_job(context: ContextTypes.DEFAULT_TYPE):
             logger.error(f"Email check failed for {u['user_id']}: {e}")
 
 
+_last_digest_sent: dict[int, str] = {}
+
+EMOJI_MAP = {
+    "еда": "\U0001f354", "продукты": "\U0001f6d2", "транспорт": "\U0001f697",
+    "покупки": "\U0001f6cd\ufe0f", "развлечения": "\U0001f3ac",
+    "здоровье": "\U0001f3e5", "жильё": "\U0001f3e0",
+    "подписки": "\U0001f4f1", "другое": "\U0001f4cc",
+}
+
+
+async def weekly_digest_job(context: ContextTypes.DEFAULT_TYPE):
+    """Send weekly expense digest every Sunday at 20:00 user local time."""
+    user_ids = await get_all_active_users()
+    for user_id in user_ids:
+        try:
+            user_tz = await _get_user_tz(user_id)
+            now_local = datetime.now(user_tz)
+
+            if now_local.weekday() != 6 or now_local.hour != 20:
+                continue
+
+            today_str = now_local.strftime("%Y-%m-%d")
+            if _last_digest_sent.get(user_id) == today_str:
+                continue
+
+            # This week: Monday to now
+            days_since_monday = now_local.weekday()
+            monday = datetime(now_local.year, now_local.month, now_local.day, tzinfo=user_tz) - timedelta(days=days_since_monday)
+            sunday_end = monday + timedelta(days=7)
+            week_start_utc = monday.astimezone(timezone.utc)
+            week_end_utc = sunday_end.astimezone(timezone.utc)
+
+            # Previous week
+            prev_monday = monday - timedelta(days=7)
+            prev_start_utc = prev_monday.astimezone(timezone.utc)
+
+            expenses = await get_expenses(user_id, since=week_start_utc, until=week_end_utc)
+            if not expenses:
+                continue
+
+            currency = await get_default_currency(user_id)
+            from currency import convert
+
+            # Totals with conversion
+            total = 0.0
+            by_cat: dict[str, float] = {}
+            for e in expenses:
+                amt = e["amount"]
+                cur = e.get("currency", currency)
+                if cur != currency:
+                    converted = convert(amt, cur, currency)
+                    if converted is not None:
+                        amt = converted
+                total += amt
+                cat = e.get("category") or "другое"
+                by_cat[cat] = by_cat.get(cat, 0) + amt
+
+            # Previous week total
+            prev_expenses = await get_expenses(user_id, since=prev_start_utc, until=week_start_utc)
+            prev_total = 0.0
+            for e in prev_expenses:
+                amt = e["amount"]
+                cur = e.get("currency", currency)
+                if cur != currency:
+                    converted = convert(amt, cur, currency)
+                    if converted is not None:
+                        amt = converted
+                prev_total += amt
+
+            # Format message
+            lines = [f"📅 Еженедельный отчёт\n", f"💰 За неделю: {total:,.0f} {currency}"]
+
+            if prev_total > 0:
+                change = ((total - prev_total) / prev_total) * 100
+                sign = "+" if change >= 0 else ""
+                lines.append(f"📊 vs прошлая: {sign}{change:.0f}%")
+            elif prev_total == 0 and prev_expenses:
+                lines.append("📊 vs прошлая: нет данных")
+
+            top3 = sorted(by_cat.items(), key=lambda x: -x[1])[:3]
+            if top3:
+                lines.append("\n🏆 Топ категории:")
+                for i, (cat, amt) in enumerate(top3, 1):
+                    emoji = EMOJI_MAP.get(cat, "📌")
+                    lines.append(f"  {i}. {emoji} {cat} — {amt:,.0f} {currency}")
+
+            await context.bot.send_message(chat_id=user_id, text="\n".join(lines))
+            _last_digest_sent[user_id] = today_str
+
+        except Exception as e:
+            logger.error(f"Weekly digest failed for {user_id}: {e}")
+
+
+# --- Subscriptions ---
+
+async def sub_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_allowed(update.effective_user.id):
+        return
+    if not context.args or len(context.args) < 2:
+        await update.message.reply_text(
+            "Использование:\n"
+            "/sub Netflix 1500\n"
+            "/sub Аренда 45000 15 — 15-го числа\n"
+            "/sub Spotify 500 EUR 1 подписки\n\n"
+            "/subs — мои подписки\n"
+            "/unsub Netflix — отменить"
+        )
+        return
+
+    user_id = update.effective_user.id
+
+    # Parse: scan args until we find a number (amount)
+    name_parts = []
+    amount = None
+    rest_args = []
+    for i, arg in enumerate(context.args):
+        try:
+            amount = float(arg)
+            rest_args = list(context.args[i + 1:])
+            break
+        except ValueError:
+            name_parts.append(arg)
+
+    if not name_parts or amount is None or amount <= 0:
+        await update.message.reply_text("Формат: /sub <название> <сумма> [день] [валюта] [категория]")
+        return
+
+    name = " ".join(name_parts)
+    currency = await get_default_currency(user_id)
+    day_of_month = 1
+    category = "подписки"
+
+    for arg in rest_args:
+        try:
+            d = int(arg)
+            if 1 <= d <= 31:
+                day_of_month = d
+                continue
+        except ValueError:
+            pass
+        if len(arg) == 3 and arg.upper() in ("EUR", "USD", "RSD", "RUB"):
+            currency = arg.upper()
+        elif arg.upper() in CURRENCY_ALIASES.values() or arg.lower() in CURRENCY_ALIASES:
+            currency = CURRENCY_ALIASES.get(arg.lower(), arg.upper())
+        elif arg.lower() in CATEGORIES:
+            category = arg.lower()
+        else:
+            category = arg.lower()
+
+    await add_subscription(user_id, name, amount, currency, category, day_of_month)
+    await update.message.reply_text(
+        f"📌 Подписка добавлена: {name} — {amount:.0f} {currency}, "
+        f"{day_of_month}-го числа [{category}]"
+    )
+
+
+async def subs_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_allowed(update.effective_user.id):
+        return
+    user_id = update.effective_user.id
+    subs = await get_active_subscriptions(user_id)
+    if not subs:
+        await update.message.reply_text("Нет активных подписок.\nДобавить: /sub Netflix 1500")
+        return
+
+    lines = ["📌 Активные подписки:\n"]
+    total = 0.0
+    main_currency = None
+    for i, s in enumerate(subs, 1):
+        lines.append(f"{i}. {s['name']} — {s['amount']:.0f} {s['currency']} ({s['day_of_month']}-го) [{s['category']}]")
+        total += s["amount"]
+        if main_currency is None:
+            main_currency = s["currency"]
+
+    if main_currency and all(s["currency"] == main_currency for s in subs):
+        lines.append(f"\n💰 Итого: {total:,.0f} {main_currency}/мес")
+
+    lines.append("\nОтменить: /unsub <название>")
+    await update.message.reply_text("\n".join(lines))
+
+
+async def unsub_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_allowed(update.effective_user.id):
+        return
+    if not context.args:
+        await update.message.reply_text("Использование: /unsub <название>")
+        return
+
+    name = " ".join(context.args)
+    if await deactivate_subscription(update.effective_user.id, name):
+        await update.message.reply_text(f"Подписка «{name}» отменена.")
+    else:
+        await update.message.reply_text(f"Подписка «{name}» не найдена.")
+
+
+async def process_subscriptions_job(context: ContextTypes.DEFAULT_TYPE):
+    """Hourly job: auto-add expenses for due subscriptions."""
+    subs = await get_all_due_subscriptions()
+    for s in subs:
+        try:
+            user_id = s["user_id"]
+            user_tz = await _get_user_tz(user_id)
+            now_local = datetime.now(user_tz)
+
+            # Check if today is the due day
+            day = s["day_of_month"]
+            last_day = calendar.monthrange(now_local.year, now_local.month)[1]
+            due_day = min(day, last_day)
+
+            if now_local.day != due_day or now_local.hour != 9:
+                continue
+
+            # Check not already charged this month (compare in user's timezone)
+            if s["last_charged_at"]:
+                last_utc = datetime.fromisoformat(s["last_charged_at"])
+                last_local = last_utc.astimezone(user_tz)
+                if last_local.year == now_local.year and last_local.month == now_local.month:
+                    continue
+
+            # Create expense
+            await save_expense(
+                user_id, s["amount"], s["currency"],
+                s["category"], f"Подписка: {s['name']}", s["name"],
+            )
+            await mark_subscription_charged(s["id"], datetime.now(timezone.utc).isoformat())
+
+            await context.bot.send_message(
+                chat_id=user_id,
+                text=f"📌 Подписка: {s['name']} — {s['amount']:.0f} {s['currency']}",
+            )
+
+            # Budget warning
+            if s["category"]:
+                start = datetime(now_local.year, now_local.month, 1, tzinfo=user_tz).astimezone(timezone.utc)
+                if now_local.month == 12:
+                    end = datetime(now_local.year + 1, 1, 1, tzinfo=user_tz).astimezone(timezone.utc)
+                else:
+                    end = datetime(now_local.year, now_local.month + 1, 1, tzinfo=user_tz).astimezone(timezone.utc)
+
+                budget = await get_budget(user_id, s["category"])
+                if budget:
+                    spent = await get_category_total(user_id, s["category"], start, end, currency=budget["currency"])
+                    pct = spent / budget["amount"] * 100 if budget["amount"] > 0 else 0
+                    if pct >= 100:
+                        await context.bot.send_message(chat_id=user_id,
+                            text=f"🔴 Бюджет на {s['category']} превышен: {spent:.0f}/{budget['amount']:.0f} {budget['currency']} ({pct:.0f}%)")
+                    elif pct >= 80:
+                        await context.bot.send_message(chat_id=user_id,
+                            text=f"⚠️ Бюджет на {s['category']}: {spent:.0f}/{budget['amount']:.0f} {budget['currency']} ({pct:.0f}%)")
+
+        except Exception as e:
+            logger.error(f"Subscription job failed for sub {s.get('id')}: {e}")
+
+
 # --- Main ---
 
 async def main():
@@ -918,7 +1289,9 @@ async def main():
     app.add_handler(CommandHandler("month", month_cmd))
     app.add_handler(CommandHandler("top", top_cmd))
     app.add_handler(CommandHandler("history", history_cmd))
+    app.add_handler(CommandHandler("search", search_cmd))
     app.add_handler(CommandHandler("delete", delete_cmd))
+    app.add_handler(CommandHandler("edit", edit_cmd))
     app.add_handler(CommandHandler("clearall", clearall_cmd))
     app.add_handler(CommandHandler("currency", currency_cmd))
     app.add_handler(CommandHandler("timezone", timezone_cmd))
@@ -926,6 +1299,9 @@ async def main():
     app.add_handler(CommandHandler("budgets", budgets_cmd))
     app.add_handler(CommandHandler("chart", chart_cmd))
     app.add_handler(CommandHandler("email", email_cmd))
+    app.add_handler(CommandHandler("sub", sub_cmd))
+    app.add_handler(CommandHandler("subs", subs_cmd))
+    app.add_handler(CommandHandler("unsub", unsub_cmd))
     app.add_handler(MessageHandler(filters.FORWARDED, handle_forwarded))
     app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
@@ -939,17 +1315,24 @@ async def main():
             BotCommand("month", "Отчёт за месяц"),
             BotCommand("top", "Топ расходов за месяц"),
             BotCommand("history", "Последние расходы"),
+            BotCommand("search", "Поиск расходов"),
             BotCommand("delete", "Удалить расход"),
+            BotCommand("edit", "Редактировать расход"),
             BotCommand("currency", "Валюта по умолчанию"),
             BotCommand("timezone", "Часовой пояс"),
             BotCommand("budget", "Бюджет по категории"),
             BotCommand("budgets", "Все бюджеты"),
             BotCommand("chart", "График расходов"),
             BotCommand("email", "Подключить почту"),
+            BotCommand("sub", "Добавить подписку"),
+            BotCommand("subs", "Мои подписки"),
+            BotCommand("unsub", "Отменить подписку"),
         ])
 
         app.job_queue.run_repeating(check_emails_job, interval=7200, first=60, name="email_check")
-        logger.info("Email check scheduled (every 2 hours)")
+        app.job_queue.run_repeating(weekly_digest_job, interval=3600, first=120, name="weekly_digest")
+        app.job_queue.run_repeating(process_subscriptions_job, interval=3600, first=180, name="subscriptions")
+        logger.info("Jobs scheduled: email (2h), weekly digest (1h), subscriptions (1h)")
 
         await app.start()
         await app.updater.start_polling(allowed_updates=Update.ALL_TYPES)

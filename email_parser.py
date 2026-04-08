@@ -141,11 +141,14 @@ def fetch_emails(server: str, address: str, password: str,
             subject = _decode_header(msg.get("Subject", ""))
 
             if not _looks_like_receipt(sender, subject):
+                logger.debug("SKIP receipt filter: from=%s subj=%s", sender[:50], subject[:60])
                 if debug:
                     skipped.append({"from": sender[:50], "subject": subject[:60]})
                 continue
 
             body = _extract_text(msg)
+            logger.info("PASS receipt filter: from=%s subj=%s body_len=%d",
+                        sender[:50], subject[:60], len(body))
 
             results.append({
                 "uid": message_id,
@@ -154,6 +157,8 @@ def fetch_emails(server: str, address: str, password: str,
                 "body": body,
             })
 
+        logger.info("IMAP fetch done: total=%d, passed_filter=%d, skipped=%d",
+                    total_count, len(results), total_count - len(results))
         mail.logout()
     except Exception as e:
         logger.error(f"IMAP error for {address}: {e}")
